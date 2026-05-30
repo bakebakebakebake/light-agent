@@ -1,0 +1,873 @@
+import {
+  CommandRegistry,
+  type SlashCommand,
+  type CommandContext,
+} from "./registry.js";
+import {
+  loadStore,
+  saveStore,
+  setActive,
+  upsertProfile,
+  removeProfile,
+  listProfiles,
+  getActiveProfile,
+  rememberModel,
+  maskKey,
+  type Profile,
+} from "../profiles.js";
+import { collectOnboarding } from "../onboarding.js";
+import {
+  listSessions,
+  loadSession,
+  renameSession,
+  newSession,
+  deriveTitle,
+} from "../sessions.js";
+import type { PermissionMode } from "../permissions/policy.js";
+import type { ThinkingDepth } from "../model/types.js";
+import { parseThinkingDepth } from "../config.js";
+import { loadSkills } from "../ext/skills.js";
+import { loadCustomCommandDefs, buildCustomCommands } from "../ext/commands.js";
+import { renderTranscript } from "../ui/transcript.js";
+import { compactHistory } from "../loop/compact.js";
+import { colorizeDiff } from "../ui/diff.js";
+import { gitDiff } from "../util/git.js";
+import { contextWindowFor } from "../model/contextWindow.js";
+import { humanTokens } from "../ui/status.js";
+import { bold, cyan, dim, green, yellow, red, symbols } from "../ui/theme.js";
+
+/**
+ * Built-in slash commands (docs/08).
+ *
+ * These manage profiles and runtime config from inside the REPL. Commands that
+ * change the active profile or its fields persist to the store and then call
+ * state.rebuild() so the provider is swapped live — no restart.
+ *
+ * Security (docs/04): API keys are collected via ctx.ask (real user input) and
+ * only ever shown masked. The raw key is never printed.
+ */
+
+/** Build the registry with all built-ins registered. */
+export function buildRegistry(): CommandRegistry {
+  const reg = new CommandRegistry();
+  for (const cmd of BUILTINS) reg.register(cmd);
+  // Commands needing a closure over the registry are registered last.
+  reg.register(reloadCommand(reg));
+  reg.register(helpCommand(reg));
+  return reg;
+}
+
+const exitCommand: SlashCommand = {
+  name: "exit",
+  aliases: ["quit"],
+  description: "Leave Harness-Agent",
+  async run() {
+    return { exit: true };
+  },
+};
+
+const clearCommand: SlashCommand = {
+  name: "clear",
+  description: "Start a fresh conversation (clear history)",
+  async run(ctx) {
+    ctx.state.history.length = 0;
+    // Start a new persisted session so the cleared chat is saved separately.
+    ctx.state.session = newSession({
+      provider: ctx.state.config.provider,
+      model: ctx.state.config.model,
+    });
+    ctx.out(dim("  Conversation cleared."));
+    return {};
+  },
+};
+
+/**
+ * /diff — show the working-tree git diff (#2), colorized. `/diff --staged`
+ * (or `--cached`) shows the index diff. Read-only: spawns git with no mutating
+ * args. Friendly message when the directory isn't a git repo.
+ */
+const diffCommand: SlashCommand = {
+  name: "diff",
+  description: "Show uncommitted git changes (--staged for the index)",
+  subcommands: ["--staged", "--cached"],
+  async run(ctx, args) {
+    const staged = args.some((a) => a === "--staged" || a === "--cached");
+    const raw = gitDiff(ctx.state.config.workdir, { staged });
+    if (raw === null) {
+      ctx.out(dim("  Not a git repository (or git is unavailable)."));
+      return {};
+    }
+    if (raw.trim() === "") {
+      ctx.out(dim(staged ? "  No staged changes." : "  No uncommitted changes."));
+      return {};
+    }
+    ctx.out(colorizeDiff(raw.trimEnd()));
+    return {};
+  },
+};
+
+/**
+ * /compact — summarize older turns into one note, keep the recent tail verbatim
+ * (#1). Frees context without losing the thread. Auto-compaction near the
+ * window limit reuses the same machinery (compactHistory) from cli.ts; this is
+ * the manual trigger. After compacting, the screen is cleared and the shortened
+ * conversation reprinted so the result is visible (身临其境).
+ */
+const compactCommand: SlashCommand = {
+  name: "compact",
+  description: "Summarize older turns to free up context",
+  async run(ctx) {
+    const { state } = ctx;
+    if (state.history.length === 0) {
+      ctx.out(dim("  Nothing to compact — the conversation is empty."));
+      return {};
+    }
+    ctx.out(dim("  Compacting…"));
+    let result;
+    try {
+      result = await compactHistory(state.provider, state.history);
+    } catch (err) {
+      ctx.out(red(`  Compaction failed: ${(err as Error).message}`));
+      return {};
+    }
+    if (result.collapsed === 0) {
+      ctx.out(dim("  Not enough history to compact yet."));
+      return {};
+    }
+    // Replace history in place (cli.ts and the loop share this array reference).
+    state.history.length = 0;
+    state.history.push(...result.messages);
+    state.save();
+
+    if (ctx.clear) ctx.clear();
+    renderTranscript(state.history, ctx.out);
+    const total = contextWindowFor(state.config.model, state.config.contextWindow);
+    const pct = total > 0 ? Math.round((state.usage.input / total) * 100) : 0;
+    ctx.out(
+      dim(
+        `  Compacted ${result.collapsed} message(s) into a summary ` +
+          `(${pct}% context before compaction).`,
+      ),
+    );
+    return {};
+  },
+};
+
+/** Format an ISO timestamp as a short, locale-stable "YYYY-MM-DD HH:MM". */
+function shortTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n: number): string => String(n).padStart(2, "0");
+  return (
+    `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ` +
+    `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  );
+}
+
+const resumeCommand: SlashCommand = {
+  name: "resume",
+  description: "List saved conversations, or resume one by number/id",
+  async run(ctx, args) {
+    const sessions = listSessions();
+    if (sessions.length === 0) {
+      ctx.out(dim("  No saved conversations yet."));
+      return {};
+    }
+    const target = args[0];
+    let id: string | null = null;
+
+    if (!target && ctx.pick) {
+      // Arrow picker of recent sessions (B1).
+      const items = sessions.slice(0, 20).map((s) => ({
+        label: s.title,
+        value: s.id,
+        hint: `${shortTime(s.updatedAt)} ${symbols.dot} ${s.messageCount} msgs`,
+      }));
+      const choice = await ctx.pick("  Resume which conversation?", items);
+      if (choice === null) {
+        ctx.out(dim("  Resume cancelled."));
+        return {};
+      }
+      id = choice;
+    } else if (!target) {
+      // Non-TTY / no picker: list with timestamps (feature #6).
+      const rows = sessions.slice(0, 20).map((s, i) => {
+        const active = s.id === ctx.state.session.id;
+        const marker = active ? green(symbols.tool) : `${i + 1})`;
+        return (
+          `  ${marker} ${bold(s.title)} ` +
+          dim(`${symbols.dot} ${shortTime(s.updatedAt)} ${symbols.dot} ${s.messageCount} msgs`)
+        );
+      });
+      ctx.out(rows.join("\n"));
+      ctx.out(dim("  Resume with /resume <number> or /resume <id>."));
+      return {};
+    } else {
+      // Resolve by 1-based number from the list, or by (prefix of) id.
+      id = target;
+      const n = Number(target);
+      if (Number.isInteger(n) && n >= 1 && n <= sessions.length) {
+        id = sessions[n - 1]!.id;
+      } else {
+        const match = sessions.find((s) => s.id === target || s.id.startsWith(target));
+        if (match) id = match.id;
+      }
+    }
+
+    const session = loadSession(id);
+    if (!session) {
+      ctx.out(red(`  No conversation "${target ?? id}".`));
+      return {};
+    }
+    // Swap history in place so the agent loop (which holds the same array
+    // reference) keeps working, then point state at the resumed session.
+    ctx.state.history.length = 0;
+    ctx.state.history.push(...session.messages);
+    ctx.state.session = session;
+    // Immersive re-render: show the resumed conversation as if you'd been in it.
+    reprintTranscript(ctx);
+    ctx.out(
+      dim(`  Resumed "${session.title}" `) +
+        dim(`(${session.messages.length} messages, ${shortTime(session.updatedAt)}).`),
+    );
+    return {};
+  },
+};
+
+const renameCommand: SlashCommand = {
+  name: "rename",
+  description: "Rename the current conversation",
+  async run(ctx, args) {
+    const title = args.join(" ").trim();
+    if (!title) {
+      ctx.out(dim(`  Current title: ${bold(ctx.state.session.title)}`));
+      ctx.out(dim("  Usage: /rename <new title>"));
+      return {};
+    }
+    ctx.state.session.title = title;
+    // Persist immediately (renameSession is a no-op if never saved yet, so
+    // also save the live session to be safe).
+    renameSession(ctx.state.session.id, title);
+    ctx.state.save();
+    ctx.out(green(`  Renamed to "${title}".`));
+    return {};
+  },
+};
+
+const configCommand: SlashCommand = {
+  name: "config",
+  description: "Show the active profile's settings",
+  async run(ctx) {
+    const { config, profileName } = ctx.state;
+    const ctxWin = contextWindowFor(config.model, config.contextWindow);
+    const ctxLabel = config.contextWindow
+      ? `${humanTokens(ctxWin)} ${dim("(override)")}`
+      : `${humanTokens(ctxWin)} ${dim("(auto)")}`;
+    const lines = [
+      `  ${dim("profile")}  ${profileName ? cyan(profileName) : dim("(env/.env)")}`,
+      `  ${dim("provider")} ${config.provider}`,
+      `  ${dim("model")}    ${config.model}`,
+      `  ${dim("baseURL")}  ${config.baseURL ?? dim("(default)")}`,
+      `  ${dim("context")}  ${ctxLabel}`,
+      `  ${dim("apiKey")}   ${maskKey(config.apiKey)}`,
+    ];
+    ctx.out(lines.join("\n"));
+    return {};
+  },
+};
+
+/**
+ * /usage — a fuller snapshot of the live session (#9): model, permission mode,
+ * reasoning depth, and context-window consumption (last request's input size
+ * vs. the model's window). Complements the always-on one-line footer.
+ */
+const usageCommand: SlashCommand = {
+  name: "usage",
+  aliases: ["status", "ctx"],
+  description: "Show model, mode, thinking depth, and context usage",
+  async run(ctx) {
+    const { config, mode, usage } = ctx.state;
+    const total = contextWindowFor(config.model, config.contextWindow);
+    const used = usage.input;
+    const pct = total > 0 ? Math.round((used / total) * 100) : 0;
+    const bar = usageBar(used, total);
+    const depth = config.thinkingDepth ?? "off";
+    const overridden = config.contextWindow ? dim(" (override)") : "";
+    const lines = [
+      bold("  Session usage"),
+      `  ${dim("model")}    ${cyan(config.model)}`,
+      `  ${dim("mode")}     ${cyan(mode)}`,
+      `  ${dim("thinking")} ${cyan(depth)}`,
+      `  ${dim("context")}  ${bar} ${dim(
+        `${humanTokens(used)}/${humanTokens(total)} (${pct}%)`,
+      )}${overridden}`,
+      `  ${dim("turn")}     ${dim(
+        `${humanTokens(usage.input)} in ${symbols.dot} ${humanTokens(usage.output)} out`,
+      )}`,
+    ];
+    ctx.out(lines.join("\n"));
+    return {};
+  },
+};
+
+/** A compact 20-cell context-fill bar, color-graded by fullness. */
+function usageBar(used: number, total: number): string {
+  const width = 20;
+  const frac = total > 0 ? Math.min(1, used / total) : 0;
+  const filled = Math.round(frac * width);
+  const fill = "█".repeat(filled);
+  const rest = "░".repeat(width - filled);
+  const colored = frac >= 0.85 ? red(fill) : frac >= 0.6 ? yellow(fill) : green(fill);
+  return colored + dim(rest);
+}
+
+const MODE_NAMES: Record<string, PermissionMode> = {
+  default: "default",
+  plan: "plan",
+  acceptedits: "acceptEdits",
+  "accept-edits": "acceptEdits",
+  acceptedit: "acceptEdits",
+  allowall: "allowAll",
+  "allow-all": "allowAll",
+  all: "allowAll",
+};
+
+const MODE_HELP: Array<[PermissionMode, string]> = [
+  ["default", "ask before risky actions (edits notify, bash confirms)"],
+  ["plan", "read-only: no file edits or commands"],
+  ["acceptEdits", "auto-approve file edits; still confirm bash"],
+  ["allowAll", "auto-approve everything (use with care)"],
+];
+
+const modeCommand: SlashCommand = {
+  name: "mode",
+  description: "Show or set the permission mode (default|plan|acceptEdits|allowAll)",
+  subcommands: ["default", "plan", "acceptEdits", "allowAll"],
+  async run(ctx, args) {
+    const value = (args[0] ?? "").trim().toLowerCase();
+    if (!value) {
+      ctx.out(`  ${dim("mode")} ${cyan(ctx.state.mode)}`);
+      for (const [m, desc] of MODE_HELP) {
+        const mark = m === ctx.state.mode ? green(symbols.tool) : " ";
+        ctx.out(`  ${mark} ${cyan(m.padEnd(12))} ${dim(desc)}`);
+      }
+      return {};
+    }
+    const mode = MODE_NAMES[value];
+    if (!mode) {
+      ctx.out(red(`  Unknown mode "${args[0]}". Try: default, plan, acceptEdits, allowAll.`));
+      return {};
+    }
+    ctx.state.setMode(mode);
+    ctx.out(green(`  Mode set to ${mode}.`));
+    return {};
+  },
+};
+
+const rewindCommand: SlashCommand = {
+  name: "rewind",
+  description: "Jump back to an earlier turn (truncate later history)",
+  async run(ctx, args) {
+    // Index every user turn (text messages, not tool_result user messages).
+    const turns: Array<{ index: number; title: string }> = [];
+    ctx.state.history.forEach((m, i) => {
+      if (m.role !== "user") return;
+      const hasText = m.content.some((b) => b.type === "text");
+      if (hasText) turns.push({ index: i, title: deriveTitle([m], 60) });
+    });
+
+    if (turns.length === 0) {
+      ctx.out(dim("  Nothing to rewind to yet."));
+      return {};
+    }
+
+    const arg = (args[0] ?? "").trim();
+    let targetIndex: number | null = null;
+
+    if (!arg && ctx.pick) {
+      // Arrow picker of turns, newest-first (B1). The visible re-render is the
+      // confirmation — no separate y/N.
+      const items = turns
+        .map((t, i) => ({ label: `${i + 1}. ${t.title}`, value: String(t.index) }))
+        .reverse();
+      const choice = await ctx.pick("  Rewind to which turn?", items);
+      if (choice === null) {
+        ctx.out(dim("  Rewind cancelled."));
+        return {};
+      }
+      targetIndex = Number(choice);
+    } else if (!arg) {
+      // Non-TTY / no picker: list turns newest-first with a 1-based number.
+      const rows = turns.map((t, i) => `  ${i + 1}) ${t.title}`).reverse();
+      ctx.out(rows.join("\n"));
+      ctx.out(dim("  Rewind with /rewind <number> (drops that turn and everything after)."));
+      return {};
+    } else {
+      const n = Number(arg);
+      if (!Number.isInteger(n) || n < 1 || n > turns.length) {
+        ctx.out(red(`  No turn "${arg}". Use /rewind to list turns.`));
+        return {};
+      }
+      targetIndex = turns[n - 1]!.index;
+    }
+
+    // Truncate in place so the loop's shared array reference stays valid.
+    ctx.state.history.length = targetIndex;
+    ctx.state.save();
+    // Immersive re-render: clear the screen and reprint the conversation up to
+    // the rewind point, so the screen shows exactly the state you jumped to.
+    reprintTranscript(ctx);
+    ctx.out(dim(`  Rewound — ${targetIndex} message(s) kept.`));
+    return {};
+  },
+};
+
+/** Clear the screen and reprint the conversation (A3 + B5 immersive jump). */
+function reprintTranscript(ctx: CommandContext): void {
+  if (ctx.clear) {
+    ctx.clear();
+    renderTranscript(ctx.state.history, ctx.out);
+  }
+}
+
+const THINKING_HELP: Array<[ThinkingDepth, string]> = [
+  ["off", "no extended reasoning (fastest)"],
+  ["low", "a little reasoning before answering"],
+  ["medium", "moderate reasoning budget"],
+  ["high", "maximum reasoning budget (slowest)"],
+];
+
+const thinkingCommand: SlashCommand = {
+  name: "thinking",
+  aliases: ["think"],
+  description: "Show or set reasoning depth (off|low|medium|high)",
+  subcommands: ["off", "low", "medium", "high"],
+  async run(ctx, args) {
+    const current = ctx.state.config.thinkingDepth ?? "off";
+    let value = (args[0] ?? "").trim().toLowerCase();
+    // No arg: arrow-picker when available, else just show the current value.
+    if (!value && ctx.pick) {
+      const choice = await ctx.pick(
+        `  Reasoning depth ${dim(`(now: ${current})`)}`,
+        THINKING_HELP.map(([d, desc]) => ({ label: d, value: d, hint: desc })),
+      );
+      if (!choice) {
+        ctx.out(dim("  Unchanged."));
+        return {};
+      }
+      value = choice;
+    } else if (!value) {
+      ctx.out(`  ${dim("thinking")} ${cyan(current)}`);
+      for (const [d, desc] of THINKING_HELP) {
+        const mark = d === current ? green(symbols.tool) : " ";
+        ctx.out(`  ${mark} ${cyan(d.padEnd(8))} ${dim(desc)}`);
+      }
+      return {};
+    }
+    const depth = parseThinkingDepth(value);
+    if (patchActiveProfile(ctx, { thinkingDepth: depth })) {
+      ctx.out(green(`  Reasoning depth set to ${depth}.`));
+    } else {
+      // No profile to persist to (env/.env): still apply for this session.
+      ctx.state.config = { ...ctx.state.config, thinkingDepth: depth };
+      ctx.out(green(`  Reasoning depth set to ${depth} (session only).`));
+    }
+    return {};
+  },
+};
+
+const keysCommand: SlashCommand = {
+  name: "keys",
+  description: "Show keyboard shortcuts",
+  async run(ctx) {
+    const row = (k: string, d: string): string => `  ${cyan(k.padEnd(10))} ${dim(d)}`;
+    ctx.out(
+      [
+        bold("  Keyboard shortcuts"),
+        row("/", "open the command menu (↑↓ to select, Enter to run)"),
+        row("↑ / ↓", "previous / next input from history"),
+        row("Enter", "send · Alt-Enter (or trailing \\) inserts a newline"),
+        row("Ctrl-A/E", "jump to line start / end"),
+        row("Ctrl-K/U", "delete to end / clear the line"),
+        row("Ctrl-W", "delete the previous word"),
+        row("Ctrl-L", "clear the screen"),
+        row("Ctrl-C", "stop the turn (refills your question) · twice to quit"),
+      ].join("\n"),
+    );
+    return {};
+  },
+};
+/**
+ * Mutate the active profile via a patch, persist, and rebuild the provider.
+ * Reports an error (and does nothing) when there's no active profile — e.g. the
+ * session is running off env/.env, which the store commands can't edit.
+ */
+function patchActiveProfile(
+  ctx: CommandContext,
+  patch: Partial<Profile>,
+): boolean {
+  const name = ctx.state.profileName;
+  if (!name) {
+    ctx.out(
+      red("  No active profile to edit.") +
+        dim(
+          " This session is using env/.env. Run /profile new to create one.",
+        ),
+    );
+    return false;
+  }
+  const store = loadStore();
+  const current = getActiveProfile(store);
+  if (!current) {
+    ctx.out(red(`  Active profile "${name}" not found in the store.`));
+    return false;
+  }
+  upsertProfile(store, name, { ...current, ...patch });
+  saveStore(store);
+  ctx.state.rebuild();
+  return true;
+}
+
+const profilesCommand: SlashCommand = {
+  name: "profiles",
+  description: "List all profiles",
+  async run(ctx) {
+    printProfiles(ctx);
+    return {};
+  },
+};
+
+function printProfiles(ctx: CommandContext): void {
+  const store = loadStore();
+  const names = listProfiles(store);
+  if (names.length === 0) {
+    ctx.out(dim("  No profiles yet. Run /profile new to add one."));
+    return;
+  }
+  const rows = names.map((n) => {
+    const p = store.profiles[n]!;
+    const active = n === store.activeProfile;
+    const marker = active ? green(symbols.tool) : " ";
+    const label = active ? bold(n) : n;
+    return `  ${marker} ${label} ${dim(`${p.provider} ${symbols.dot} ${p.model}`)}`;
+  });
+  ctx.out(rows.join("\n"));
+}
+
+/**
+ * /profile — a small sub-command dispatcher:
+ *   /profile               → list (same as /profiles)
+ *   /profile use <name>    → switch active + rebuild
+ *   /profile new           → onboarding Q&A → new named profile
+ *   /profile edit [name]   → change fields interactively (blank = keep)
+ *   /profile rm <name>     → delete (confirm if it's the active one)
+ */
+const profileCommand: SlashCommand = {
+  name: "profile",
+  description: "Manage profiles: use | new | edit | rm",
+  subcommands: ["use", "new", "edit", "rm", "list"],
+  async run(ctx, args) {
+    const sub = args[0];
+    switch (sub) {
+      case undefined:
+      case "list":
+        printProfiles(ctx);
+        return {};
+      case "use":
+        return profileUse(ctx, args[1]);
+      case "new":
+        return profileNew(ctx);
+      case "edit":
+        return profileEdit(ctx, args[1]);
+      case "rm":
+      case "remove":
+        return profileRemove(ctx, args[1]);
+      default:
+        ctx.out(
+          red(`  Unknown subcommand "/profile ${sub}".`) +
+            dim(" Try: use | new | edit | rm"),
+        );
+        return {};
+    }
+  },
+};
+
+async function profileUse(
+  ctx: CommandContext,
+  name: string | undefined,
+): Promise<{ exit?: boolean }> {
+  if (!name) {
+    ctx.out(dim("  Usage: /profile use <name>"));
+    return {};
+  }
+  const store = loadStore();
+  try {
+    setActive(store, name);
+  } catch (err) {
+    ctx.out(red(`  ${(err as Error).message}`));
+    return {};
+  }
+  saveStore(store);
+  ctx.state.rebuild();
+  ctx.out(green(`  Switched to profile "${name}".`));
+  return {};
+}
+
+async function profileNew(ctx: CommandContext): Promise<{ exit?: boolean }> {
+  const result = await collectOnboarding(ctx.ask);
+  if (
+    !result.entries.ANTHROPIC_API_KEY &&
+    !result.entries.OPENAI_API_KEY
+  ) {
+    ctx.out(yellow("  No API key entered — profile not created."));
+    return {};
+  }
+  const store = loadStore();
+  let name = (await ctx.ask("Name this profile [default]: ")).trim() || "default";
+  // Avoid silently clobbering an existing profile with the same name.
+  while (name in store.profiles) {
+    const ans = (
+      await ctx.ask(`Profile "${name}" exists. Overwrite? [y/N] or new name: `)
+    ).trim();
+    if (/^(y|yes)$/i.test(ans)) break;
+    if (ans && !/^(n|no)$/i.test(ans)) {
+      name = ans;
+      continue;
+    }
+    // declined without a new name → keep prompting for a name
+    name = (await ctx.ask("New profile name: ")).trim() || name;
+    if (!(name in store.profiles)) break;
+  }
+  const profile: Profile = {
+    provider: result.provider,
+    model: result.model,
+    apiKey: result.entries.ANTHROPIC_API_KEY ?? result.entries.OPENAI_API_KEY!,
+    ...(result.baseURL ? { baseURL: result.baseURL } : {}),
+  };
+  upsertProfile(store, name, profile);
+  setActive(store, name);
+  saveStore(store);
+  ctx.state.rebuild();
+  ctx.out(green(`  Created and switched to profile "${name}".`));
+  return {};
+}
+
+async function profileEdit(
+  ctx: CommandContext,
+  nameArg: string | undefined,
+): Promise<{ exit?: boolean }> {
+  const store = loadStore();
+  const name = nameArg ?? store.activeProfile ?? "";
+  const current = store.profiles[name];
+  if (!current) {
+    ctx.out(red(`  No profile named "${name}".`));
+    return {};
+  }
+  ctx.out(dim(`  Editing "${name}". Press Enter to keep the current value.`));
+  if ((current.recentModels ?? []).length > 1) {
+    ctx.out(dim(`  recent models: ${current.recentModels!.slice(0, 6).join(", ")}`));
+  }
+  const model = (await ctx.ask(`Model [${current.model}]: `)).trim();
+  const baseURL = (
+    await ctx.ask(`Base URL [${current.baseURL ?? "(default)"}]: `)
+  ).trim();
+  const key = (await ctx.ask("API key [keep current]: ", { secret: true })).trim();
+
+  let next: Profile = {
+    ...current,
+    ...(model ? { model } : {}),
+    ...(key ? { apiKey: key } : {}),
+  };
+  if (baseURL) next.baseURL = baseURL;
+  // Record the model in recent history when it changed (feature #8).
+  if (model) next = rememberModel(next, model);
+  upsertProfile(store, name, next);
+  saveStore(store);
+  if (name === store.activeProfile) ctx.state.rebuild();
+  ctx.out(green(`  Updated profile "${name}".`));
+  return {};
+}
+
+async function profileRemove(
+  ctx: CommandContext,
+  name: string | undefined,
+): Promise<{ exit?: boolean }> {
+  if (!name) {
+    ctx.out(dim("  Usage: /profile rm <name>"));
+    return {};
+  }
+  const store = loadStore();
+  if (!(name in store.profiles)) {
+    ctx.out(red(`  No profile named "${name}".`));
+    return {};
+  }
+  if (name === store.activeProfile) {
+    const ans = (
+      await ctx.ask(
+        `"${name}" is the active profile. Remove it anyway? [y/N] `,
+      )
+    ).trim();
+    if (!/^(y|yes)$/i.test(ans)) {
+      ctx.out(dim("  Cancelled."));
+      return {};
+    }
+  }
+  removeProfile(store, name);
+  saveStore(store);
+  ctx.state.rebuild();
+  ctx.out(green(`  Removed profile "${name}".`));
+  if (!store.activeProfile) {
+    ctx.out(yellow("  No profiles left — run /profile new to add one."));
+  }
+  return {};
+}
+
+const modelCommand: SlashCommand = {
+  name: "model",
+  description: "Show or set the model on the active profile",
+  async run(ctx, args) {
+    const value = args.join(" ").trim();
+    if (!value) {
+      ctx.out(`  ${dim("model")} ${ctx.state.config.model}`);
+      const recent = activeRecentModels(ctx);
+      if (recent.length > 1) {
+        ctx.out(dim(`  recent: ${recent.slice(0, 6).join(", ")}`));
+      }
+      return {};
+    }
+    // Set the model and record it as most-recently-used (feature #8).
+    const store = loadStore();
+    const current = getActiveProfile(store);
+    if (current) {
+      const next = rememberModel({ ...current, model: value }, value);
+      if (patchActiveProfile(ctx, next)) {
+        ctx.out(green(`  Model set to "${value}".`));
+      }
+    } else if (patchActiveProfile(ctx, { model: value })) {
+      ctx.out(green(`  Model set to "${value}".`));
+    }
+    return {};
+  },
+};
+
+/** Recent model ids of the active profile, newest first (may be empty). */
+function activeRecentModels(ctx: CommandContext): string[] {
+  const store = loadStore();
+  const current = getActiveProfile(store);
+  return current?.recentModels ?? [];
+}
+
+/**
+ * /skill — inject a project/user Skill's body as context for the next turn
+ * (B2, docs/09). No arg lists available skills (arrow picker when possible).
+ * Skill content is untrusted data: it shapes the prompt but never bypasses the
+ * permission gate.
+ */
+const skillCommand: SlashCommand = {
+  name: "skill",
+  aliases: ["skills"],
+  description: "Load a Skill's context for the next turn (or list skills)",
+  async run(ctx, args) {
+    const skills = loadSkills(ctx.state.config.workdir);
+    if (skills.size === 0) {
+      ctx.out(dim("  No skills found. Add files under .agent/skills/."));
+      return {};
+    }
+    let name = (args[0] ?? "").trim().toLowerCase();
+    if (!name && ctx.pick) {
+      const choice = await ctx.pick(
+        "  Load which skill?",
+        [...skills.values()].map((s) => ({
+          label: s.name,
+          value: s.name,
+          hint: `${s.description} (${s.scope})`,
+        })),
+      );
+      if (!choice) {
+        ctx.out(dim("  Cancelled."));
+        return {};
+      }
+      name = choice;
+    } else if (!name) {
+      ctx.out(bold("  Skills"));
+      for (const s of skills.values()) {
+        ctx.out(`  ${cyan(s.name.padEnd(16))} ${dim(`${s.description} (${s.scope})`)}`);
+      }
+      ctx.out(dim("  Load with /skill <name>."));
+      return {};
+    }
+    const skill = skills.get(name);
+    if (!skill) {
+      ctx.out(red(`  No skill "${name}". Type /skill to list.`));
+      return {};
+    }
+    ctx.state.pendingContext.push(
+      `# Skill: ${skill.name}\n\n${skill.body}`,
+    );
+    ctx.out(green(`  Loaded skill "${skill.name}" — it'll inform your next message.`));
+    return {};
+  },
+};
+
+/** /reload — re-scan extension dirs for skills and custom commands (B2). */
+function reloadCommand(reg: CommandRegistry): SlashCommand {
+  return {
+    name: "reload",
+    description: "Re-scan .agent dirs for skills and custom commands",
+    async run(ctx) {
+      const defs = loadCustomCommandDefs(ctx.state.config.workdir);
+      for (const c of buildCustomCommands(defs)) reg.register(c);
+      const skills = loadSkills(ctx.state.config.workdir);
+      ctx.out(
+        green(`  Reloaded: ${defs.length} command(s), ${skills.size} skill(s).`),
+      );
+      return {};
+    },
+  };
+}
+function helpCommand(reg: CommandRegistry): SlashCommand {
+  return {
+    name: "help",
+    aliases: ["?"],
+    description: "Show this help",
+    async run(ctx) {
+      const fmt = (name: string, desc: string): string =>
+        `  ${cyan(("/" + name).padEnd(18))} ${dim(desc)}`;
+      // reg.list() already includes /help (registered in buildRegistry).
+      const lines = reg.list().map((c) => fmt(c.name, c.description));
+      ctx.out(
+        bold("  Commands") +
+          "\n" +
+          lines.join("\n") +
+          "\n" +
+          dim("  Anything else is sent to the agent. ") +
+          dim("Type ") +
+          cyan("/") +
+          dim(" then Tab to browse commands, or ") +
+          cyan("/keys") +
+          dim(" for keyboard shortcuts."),
+      );
+      return {};
+    },
+  };
+}
+
+/** Every built-in except /help and /reload (which need the registry). */
+const BUILTINS: SlashCommand[] = [
+  exitCommand,
+  clearCommand,
+  compactCommand,
+  diffCommand,
+  configCommand,
+  usageCommand,
+  profilesCommand,
+  profileCommand,
+  modelCommand,
+  thinkingCommand,
+  skillCommand,
+  resumeCommand,
+  renameCommand,
+  modeCommand,
+  rewindCommand,
+  keysCommand,
+];

@@ -1,0 +1,279 @@
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { resolve } from "node:path";
+import {
+  loadStore,
+  getActiveProfile,
+  profileToConfig,
+} from "./profiles.js";
+import type { ThinkingDepth } from "./model/types.js";
+
+/** Parse a thinking-depth string (env or stored) into a valid ThinkingDepth. */
+export function parseThinkingDepth(value: string | undefined): ThinkingDepth {
+  switch ((value ?? "").trim().toLowerCase()) {
+    case "low":
+      return "low";
+    case "medium":
+    case "med":
+      return "medium";
+    case "high":
+    case "max":
+      return "high";
+    default:
+      return "off";
+  }
+}
+
+/**
+ * Parse a context-window override (#11) from env/string. Accepts a plain token
+ * count ("128000") or a "k" suffix ("128k", "200K"). Returns undefined for
+ * missing/invalid input so callers fall back to the model table.
+ */
+export function parseContextWindow(value: string | undefined): number | undefined {
+  const raw = (value ?? "").trim().toLowerCase();
+  if (!raw) return undefined;
+  const m = /^(\d+(?:\.\d+)?)(k)?$/.exec(raw);
+  if (!m) return undefined;
+  const n = parseFloat(m[1]!) * (m[2] ? 1000 : 1);
+  const tokens = Math.round(n);
+  return tokens > 0 ? tokens : undefined;
+}
+
+/**
+ * Minimal .env loader — keeps us dependency-free.
+ * Only sets keys that aren't already present in process.env.
+ */
+function loadDotEnv(cwd: string): void {
+  const envPath = resolve(cwd, ".env");
+  if (!existsSync(envPath)) return;
+  const raw = readFileSync(envPath, "utf8");
+  for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    let value = trimmed.slice(eq + 1).trim();
+    // strip surrounding quotes
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (key && !(key in process.env)) {
+      process.env[key] = value;
+    }
+  }
+}
+
+export interface Config {
+  /** Which adapter to use. "anthropic" = native Messages API (or an
+   * Anthropic-compatible proxy); "openai" = any OpenAI-compatible endpoint. */
+  provider: "anthropic" | "openai";
+  apiKey: string;
+  model: string;
+  /** Optional override for the API base URL (proxies, aggregators, local). */
+  baseURL?: string;
+  /** Reasoning depth (A1). Defaults to "off". */
+  thinkingDepth?: ThinkingDepth;
+  /**
+   * Optional context-window override in tokens (#11). Wins over the built-in
+   * model→window table when set (profile field or HARNESS_CONTEXT_WINDOW).
+   */
+  contextWindow?: number;
+  /** Working directory the agent is allowed to operate within. */
+  workdir: string;
+  /** Hard cap on agent loop turns (stop condition — see docs/01). */
+  maxTurns: number;
+  /** Per-command timeout for the Bash tool in ms (see docs/10). */
+  bashTimeoutMs: number;
+}
+
+const DEFAULT_MODEL = "claude-sonnet-4-5-20250929";
+
+/** Re-export the default so the onboarding wizard can show/seed it. */
+export const DEFAULT_ANTHROPIC_MODEL = DEFAULT_MODEL;
+
+/**
+ * Load .env into process.env, then report whether enough credentials exist to
+ * build a Config without throwing. Used by the CLI to decide whether to run the
+ * first-run onboarding wizard. We don't validate the key, only its presence —
+ * the first live request is the real test.
+ *
+ * A configured profile store counts as configured (the primary path); the
+ * env/.env check is the fallback for power users and CI.
+ */
+export function isConfigured(cwd: string = process.cwd()): boolean {
+  if (resolveActiveProfileName()) return true;
+
+  loadDotEnv(cwd);
+  const provider =
+    (process.env.HARNESS_PROVIDER ?? "anthropic").toLowerCase() === "openai"
+      ? "openai"
+      : "anthropic";
+  if (provider === "openai") {
+    return Boolean(process.env.OPENAI_API_KEY && process.env.HARNESS_MODEL);
+  }
+  return Boolean(process.env.ANTHROPIC_API_KEY);
+}
+
+/**
+ * Which profile name should be active this run: HARNESS_PROFILE wins (a one-off
+ * override that does not mutate the persisted activeProfile), otherwise the
+ * store's activeProfile. Returns null if neither resolves to an existing
+ * profile.
+ */
+function resolveActiveProfileName(): string | null {
+  const store = loadStore();
+  const override = process.env.HARNESS_PROFILE;
+  if (override && override in store.profiles) return override;
+  if (store.activeProfile && store.activeProfile in store.profiles) {
+    return store.activeProfile;
+  }
+  return null;
+}
+
+/**
+ * Resolve the runtime Config (docs/06). Precedence:
+ *  1. The active profile in the global store (primary path; HARNESS_PROFILE can
+ *     override which profile for one run).
+ *  2. Otherwise the env/.env path (loadConfig) — kept for power users and CI.
+ *  3. If neither yields credentials, returns null so the caller can onboard.
+ *
+ * Unlike loadConfig this never throws on missing credentials — it returns null,
+ * which the CLI turns into the onboarding flow.
+ */
+export function resolveConfig(cwd: string = process.cwd()): Config | null {
+  const name = resolveActiveProfileName();
+  if (name) {
+    const store = loadStore();
+    const profile = getActiveProfile({
+      activeProfile: name,
+      profiles: store.profiles,
+    });
+    if (profile) return profileToConfig(profile, cwd);
+  }
+
+  try {
+    return loadConfig(cwd);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Merge key/value entries into the project's .env file (creating it if needed),
+ * preserving any existing lines and comments. Existing keys are updated in
+ * place; new keys are appended. Returns the path written.
+ *
+ * Security: the caller (onboarding wizard) collects the API key from real user
+ * input on stdin. We never log the value here, and .env is gitignored.
+ */
+export function writeEnvEntries(
+  cwd: string,
+  entries: Record<string, string>,
+): string {
+  const envPath = resolve(cwd, ".env");
+  const existing = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
+  const lines = existing.length ? existing.split("\n") : [];
+  const remaining = { ...entries };
+
+  // Update keys already present (skip comments / blank lines).
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = (lines[i] ?? "").trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    if (key in remaining) {
+      lines[i] = `${key}=${remaining[key]}`;
+      delete remaining[key];
+    }
+  }
+
+  // Drop a single trailing empty line so we append cleanly.
+  while (lines.length && (lines[lines.length - 1] ?? "").trim() === "") {
+    lines.pop();
+  }
+
+  // Append any keys that weren't already present.
+  for (const [key, value] of Object.entries(remaining)) {
+    lines.push(`${key}=${value}`);
+  }
+
+  writeFileSync(envPath, lines.join("\n") + "\n", "utf8");
+  return envPath;
+}
+
+/**
+ * Build the runtime config from environment + .env.
+ *
+ * Provider selection (docs/06): the loop only talks to the ModelProvider
+ * interface, so swapping providers is purely config.
+ *  - HARNESS_PROVIDER=anthropic (default) reads ANTHROPIC_API_KEY and the
+ *    optional ANTHROPIC_BASE_URL (set this to point at an Anthropic-compatible
+ *    proxy / 中转站).
+ *  - HARNESS_PROVIDER=openai reads OPENAI_API_KEY and OPENAI_BASE_URL, for any
+ *    OpenAI-compatible endpoint (OpenRouter, DeepSeek, Kimi, Qwen, local
+ *    Ollama/vLLM, …). HARNESS_MODEL is required here since there is no sensible
+ *    default model across those services.
+ *
+ * Throws a clear error if the needed key is missing.
+ */
+export function loadConfig(cwd: string = process.cwd()): Config {
+  loadDotEnv(cwd);
+
+  const provider =
+    (process.env.HARNESS_PROVIDER ?? "anthropic").toLowerCase() === "openai"
+      ? "openai"
+      : "anthropic";
+
+  const common = {
+    provider,
+    workdir: cwd,
+    maxTurns: 50,
+    bashTimeoutMs: 120_000,
+    ...(process.env.HARNESS_THINKING
+      ? { thinkingDepth: parseThinkingDepth(process.env.HARNESS_THINKING) }
+      : {}),
+    ...(parseContextWindow(process.env.HARNESS_CONTEXT_WINDOW)
+      ? { contextWindow: parseContextWindow(process.env.HARNESS_CONTEXT_WINDOW) }
+      : {}),
+  } as const;
+
+  if (provider === "openai") {
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      throw new Error(
+        "HARNESS_PROVIDER=openai but OPENAI_API_KEY is not set. Add it to " +
+          ".env (and OPENAI_BASE_URL if your provider needs one).",
+      );
+    }
+    const model = process.env.HARNESS_MODEL;
+    if (!model) {
+      throw new Error(
+        "HARNESS_PROVIDER=openai requires HARNESS_MODEL (there is no default " +
+          "model across OpenAI-compatible providers), " +
+          'e.g. HARNESS_MODEL="deepseek-chat" or "moonshot-v1-8k".',
+      );
+    }
+    const baseURL = process.env.OPENAI_BASE_URL;
+    return { ...common, apiKey, model, ...(baseURL ? { baseURL } : {}) };
+  }
+
+  // provider === "anthropic"
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    throw new Error(
+      "Missing ANTHROPIC_API_KEY. Copy .env.example to .env and set your key, " +
+        "or export ANTHROPIC_API_KEY in your shell.",
+    );
+  }
+  const baseURL = process.env.ANTHROPIC_BASE_URL;
+  return {
+    ...common,
+    apiKey,
+    model: process.env.HARNESS_MODEL ?? DEFAULT_MODEL,
+    ...(baseURL ? { baseURL } : {}),
+  };
+}

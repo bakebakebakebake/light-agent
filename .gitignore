@@ -1,0 +1,20 @@
+# dependencies
+node_modules/
+
+# build output
+dist/
+
+# secrets
+.env
+.env.local
+
+# logs / sessions
+.agent/
+*.log
+
+# OS
+.DS_Store
+
+# editor
+.vscode/
+.idea/
