@@ -1,15 +1,42 @@
 {
   "name": "harness-agent",
-  "version": "0.3.0",
-  "private": true,
+  "version": "0.3.1",
+  "private": false,
   "type": "module",
   "description": "A minimal coding agent CLI built from the docs/ architecture reference",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bakebakebakebake/harness-agent.git"
+  },
+  "homepage": "https://github.com/bakebakebakebake/harness-agent",
+  "bugs": {
+    "url": "https://github.com/bakebakebakebake/harness-agent/issues"
+  },
+  "keywords": [
+    "agent",
+    "cli",
+    "coding-agent",
+    "llm",
+    "mcp"
+  ],
   "bin": {
     "harness-agent": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    ".env.example",
+    "AGENT.md"
+  ],
+  "publishConfig": {
+    "access": "public"
   },
   "scripts": {
     "dev": "tsx src/cli.ts",
     "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
