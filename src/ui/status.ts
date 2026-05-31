@@ -19,7 +19,7 @@ import type { ThinkingDepth } from "../model/types.js";
 export interface StatusInfo {
   workdir: string;
   model: string;
-  /** Approx tokens currently in context (last request's input size). */
+  /** Approx tokens currently in context. */
   used: number;
   /** Model's context window. */
   total: number;
@@ -43,6 +43,15 @@ export function tildify(p: string): string {
 export function humanTokens(n: number): string {
   if (n < 1000) return String(n);
   return (n / 1000).toFixed(1).replace(/\.0$/, "") + "k";
+}
+
+/** Format a context-window percentage for humans. */
+export function formatContextPercent(used: number, total: number): string {
+  if (total <= 0) return "0%";
+  const pct = (used / total) * 100;
+  if (pct <= 0) return "0%";
+  if (pct < 1) return `${Math.max(0.1, Number(pct.toFixed(1))).toFixed(1)}%`;
+  return `${Math.round(pct)}%`;
 }
 
 /**
@@ -84,8 +93,7 @@ export function statusLine(info: {
   const parts: string[] = [cyan(info.model)];
   parts.push(cyan(`${info.mode} mode`));
   parts.push(dim(`thinking ${info.thinking ?? "off"}`));
-  const pct = info.total > 0 ? Math.round((info.used / info.total) * 100) : 0;
-  parts.push(dim(`${pct}% context`));
+  parts.push(dim(`${formatContextPercent(info.used, info.total)} context`));
   return "  " + parts.join(gray(" · "));
 }
 

@@ -28,12 +28,14 @@ import type { ThinkingDepth, Message } from "../model/types.js";
 import { parseThinkingDepth } from "../config.js";
 import { loadSkills } from "../ext/skills.js";
 import { loadCustomCommandDefs, buildCustomCommands } from "../ext/commands.js";
+import { loadMcpServerDefinitions } from "../ext/mcp.js";
 import { renderTranscript } from "../ui/transcript.js";
 import { compactHistory } from "../loop/compact.js";
 import { colorizeDiff } from "../ui/diff.js";
 import { gitDiff } from "../util/git.js";
 import { contextWindowFor } from "../model/contextWindow.js";
-import { humanTokens } from "../ui/status.js";
+import { modelHint, selectModel } from "../model/selection.js";
+import { humanTokens, formatContextPercent } from "../ui/status.js";
 import { bold, cyan, dim, green, yellow, red, symbols } from "../ui/theme.js";
 import { cloneTodos, formatTodoList } from "../todos.js";
 
@@ -124,6 +126,7 @@ const compactCommand: SlashCommand = {
       ctx.out(dim("  Nothing to compact — the conversation is empty."));
       return {};
     }
+    const usedBefore = state.estimateContext();
     ctx.out(dim("  Compacting…"));
     let result;
     try {
@@ -144,11 +147,10 @@ const compactCommand: SlashCommand = {
     if (ctx.clear) ctx.clear();
     renderTranscript(state.history, ctx.out);
     const total = contextWindowFor(state.config.model, state.config.contextWindow);
-    const pct = total > 0 ? Math.round((state.usage.input / total) * 100) : 0;
     ctx.out(
       dim(
         `  Compacted ${result.collapsed} message(s) into a summary ` +
-          `(${pct}% context before compaction).`,
+          `(${formatContextPercent(usedBefore, total)} context before compaction).`,
       ),
     );
     return {};
@@ -291,8 +293,8 @@ const configCommand: SlashCommand = {
 
 /**
  * /usage — a fuller snapshot of the live session (#9): model, permission mode,
- * reasoning depth, and context-window consumption (last request's input size
- * vs. the model's window). Complements the always-on one-line footer.
+ * reasoning depth, and context-window consumption (whole current prompt vs.
+ * the model's window). Complements the always-on one-line footer.
  */
 const usageCommand: SlashCommand = {
   name: "usage",
@@ -301,8 +303,7 @@ const usageCommand: SlashCommand = {
   async run(ctx) {
     const { config, mode, usage } = ctx.state;
     const total = contextWindowFor(config.model, config.contextWindow);
-    const used = usage.input;
-    const pct = total > 0 ? Math.round((used / total) * 100) : 0;
+    const used = ctx.state.estimateContext();
     const bar = usageBar(used, total);
     const depth = config.thinkingDepth ?? "off";
     const overridden = config.contextWindow ? dim(" (override)") : "";
@@ -312,9 +313,9 @@ const usageCommand: SlashCommand = {
       `  ${dim("mode")}     ${cyan(mode)}`,
       `  ${dim("thinking")} ${cyan(depth)}`,
       `  ${dim("context")}  ${bar} ${dim(
-        `${humanTokens(used)}/${humanTokens(total)} (${pct}%)`,
+        `${humanTokens(used)}/${humanTokens(total)} (${formatContextPercent(used, total)})`,
       )}${overridden}`,
-      `  ${dim("turn")}     ${dim(
+      `  ${dim("last call")} ${dim(
         `${humanTokens(usage.input)} in ${symbols.dot} ${humanTokens(usage.output)} out`,
       )}`,
     ];
@@ -357,7 +358,22 @@ const modeCommand: SlashCommand = {
   description: "Show or set the permission mode (default|plan|acceptEdits|allowAll)",
   subcommands: ["default", "plan", "acceptEdits", "allowAll"],
   async run(ctx, args) {
-    const value = (args[0] ?? "").trim().toLowerCase();
+    let value = (args[0] ?? "").trim().toLowerCase();
+    if (!value && ctx.pick) {
+      const choice = await ctx.pick(
+        `  Permission mode ${dim(`(now: ${ctx.state.mode})`)}`,
+        MODE_HELP.map(([mode, desc]) => ({
+          label: mode,
+          value: mode,
+          hint: desc,
+        })),
+      );
+      if (!choice) {
+        ctx.out(dim("  Unchanged."));
+        return {};
+      }
+      value = choice.toLowerCase();
+    }
     if (!value) {
       ctx.out(`  ${dim("mode")} ${cyan(ctx.state.mode)}`);
       for (const [m, desc] of MODE_HELP) {
@@ -554,15 +570,6 @@ function patchActiveProfile(
   return true;
 }
 
-const profilesCommand: SlashCommand = {
-  name: "profiles",
-  description: "List all profiles",
-  async run(ctx) {
-    printProfiles(ctx);
-    return {};
-  },
-};
-
 function printProfiles(ctx: CommandContext): void {
   const store = loadStore();
   const names = listProfiles(store);
@@ -574,7 +581,7 @@ function printProfiles(ctx: CommandContext): void {
     const p = store.profiles[n]!;
     const active = n === store.activeProfile;
     const marker = active ? green(symbols.tool) : " ";
-    const label = active ? bold(n) : n;
+    const label = active ? bold(green(n)) : n;
     return `  ${marker} ${label} ${dim(`${p.provider} ${symbols.dot} ${p.model}`)}`;
   });
   ctx.out(rows.join("\n"));
@@ -582,7 +589,7 @@ function printProfiles(ctx: CommandContext): void {
 
 /**
  * /profile — a small sub-command dispatcher:
- *   /profile               → list (same as /profiles)
+ *   /profile               → picker / list / create / edit / remove
  *   /profile use <name>    → switch active + rebuild
  *   /profile new           → onboarding Q&A → new named profile
  *   /profile edit [name]   → change fields interactively (blank = keep)
@@ -590,12 +597,14 @@ function printProfiles(ctx: CommandContext): void {
  */
 const profileCommand: SlashCommand = {
   name: "profile",
-  description: "Manage profiles: use | new | edit | rm",
+  aliases: ["profiles"],
+  description: "Manage profiles: pick | use | new | edit | rm",
   subcommands: ["use", "new", "edit", "rm", "list"],
   async run(ctx, args) {
     const sub = args[0];
     switch (sub) {
       case undefined:
+        return profileHome(ctx);
       case "list":
         printProfiles(ctx);
         return {};
@@ -617,6 +626,120 @@ const profileCommand: SlashCommand = {
     }
   },
 };
+
+async function profileHome(ctx: CommandContext): Promise<{ exit?: boolean }> {
+  const store = loadStore();
+  const items = profilePickerItems(store);
+
+  if (!ctx.pick) {
+    printProfileHomeText(ctx, store);
+    return {};
+  }
+
+  const choice = await ctx.pick("  Choose a profile", items);
+  if (!choice) {
+    ctx.out(dim("  Cancelled."));
+    return {};
+  }
+  if (choice === "new") return profileNew(ctx);
+  if (choice === "edit") return profileEdit(ctx, undefined);
+  if (choice === "rm") return profileRemove(ctx, store.activeProfile ?? undefined);
+  if (choice.startsWith("use:")) return profileUse(ctx, choice.slice(4));
+  return {};
+}
+
+function profilePickerItems(store: ReturnType<typeof loadStore>): Array<{
+  label: string;
+  value: string;
+  hint?: string;
+  selectable?: boolean;
+  tone?: "green" | "dim";
+}> {
+  const items: Array<{
+    label: string;
+    value: string;
+    hint?: string;
+    selectable?: boolean;
+    tone?: "green" | "dim";
+  }> = [
+    {
+      label: "Profiles",
+      value: "__profiles__",
+      selectable: false,
+      tone: "dim",
+    },
+  ];
+  const names = listProfiles(store);
+  if (names.length === 0) {
+    items.push({
+      label: "(none yet)",
+      value: "__profiles_empty__",
+      selectable: false,
+      tone: "dim",
+    });
+  } else {
+    for (const name of names) {
+      const p = store.profiles[name]!;
+      const active = name === store.activeProfile;
+      items.push({
+        label: active ? `${name} (active)` : name,
+        value: `use:${name}`,
+        hint: `${p.provider} ${symbols.dot} ${p.model}`,
+        ...(active ? { tone: "green" as const } : {}),
+      });
+    }
+  }
+
+  items.push({
+    label: "Actions",
+    value: "__actions__",
+    selectable: false,
+    tone: "dim",
+  });
+  items.push({
+    label: "New profile",
+    value: "new",
+    hint: "Create a fresh profile",
+  });
+  if (store.activeProfile) {
+    items.push({
+      label: "Edit active profile",
+      value: "edit",
+      hint: store.activeProfile,
+    });
+    items.push({
+      label: "Remove active profile",
+      value: "rm",
+      hint: store.activeProfile,
+    });
+  }
+  return items;
+}
+
+function printProfileHomeText(
+  ctx: CommandContext,
+  store: ReturnType<typeof loadStore>,
+): void {
+  const names = listProfiles(store);
+  ctx.out(dim("  Profiles"));
+  if (names.length === 0) {
+    ctx.out(dim("    (none yet)"));
+  } else {
+    for (const name of names) {
+      const p = store.profiles[name]!;
+      const active = name === store.activeProfile;
+      const label = active ? green(`${name} (active)`) : name;
+      ctx.out(`    ${label} ${dim(`${p.provider} ${symbols.dot} ${p.model}`)}`);
+    }
+  }
+  ctx.out(dim("  Actions"));
+  ctx.out("    New profile");
+  if (store.activeProfile) {
+    ctx.out(`    Edit active profile ${dim(`(${store.activeProfile})`)}`);
+    ctx.out(`    Remove active profile ${dim(`(${store.activeProfile})`)}`);
+  }
+  ctx.out(dim("  Use /profile use <name>, /profile new, /profile edit, or /profile rm."));
+}
 
 async function profileUse(
   ctx: CommandContext,
@@ -664,12 +787,13 @@ async function profileNew(ctx: CommandContext): Promise<{ exit?: boolean }> {
     name = (await ctx.ask("New profile name: ")).trim() || name;
     if (!(name in store.profiles)) break;
   }
-  const profile: Profile = {
+  let profile: Profile = {
     provider: result.provider,
     model: result.model,
     apiKey: result.entries.ANTHROPIC_API_KEY ?? result.entries.OPENAI_API_KEY!,
     ...(result.baseURL ? { baseURL: result.baseURL } : {}),
   };
+  profile = rememberModel(profile, result.model);
   upsertProfile(store, name, profile);
   setActive(store, name);
   saveStore(store);
@@ -693,20 +817,35 @@ async function profileEdit(
   if ((current.recentModels ?? []).length > 1) {
     ctx.out(dim(`  recent models: ${current.recentModels!.slice(0, 6).join(", ")}`));
   }
-  const model = (await ctx.ask(`Model [${current.model}]: `)).trim();
   const baseURL = (
     await ctx.ask(`Base URL [${current.baseURL ?? "(default)"}]: `)
   ).trim();
   const key = (await ctx.ask("API key [keep current]: ", { secret: true })).trim();
+  const source = {
+    provider: current.provider,
+    apiKey: key || current.apiKey,
+    ...(baseURL ? { baseURL } : current.baseURL ? { baseURL: current.baseURL } : {}),
+  } as const;
+  const selection = await selectModel({
+    ask: ctx.ask,
+    pick: ctx.pick,
+    currentModel: current.model,
+    recentModels: current.recentModels ?? [],
+    ...source,
+    discover: shouldDiscoverModels(source),
+    manualPrompt: `Model [${current.model}]: `,
+    choosePrompt: `  Model for "${name}"`,
+  });
+  const model = selection.model || current.model;
 
   let next: Profile = {
     ...current,
-    ...(model ? { model } : {}),
+    model,
     ...(key ? { apiKey: key } : {}),
   };
   if (baseURL) next.baseURL = baseURL;
   // Record the model in recent history when it changed (feature #8).
-  if (model) next = rememberModel(next, model);
+  next = rememberModel(next, model);
   upsertProfile(store, name, next);
   saveStore(store);
   if (name === store.activeProfile) ctx.state.rebuild();
@@ -750,28 +889,66 @@ async function profileRemove(
 
 const modelCommand: SlashCommand = {
   name: "model",
-  description: "Show or set the model on the active profile",
+  description: "Show, pick, or set the active model",
   async run(ctx, args) {
     const value = args.join(" ").trim();
     if (!value) {
-      ctx.out(`  ${dim("model")} ${ctx.state.config.model}`);
-      const recent = activeRecentModels(ctx);
-      if (recent.length > 1) {
-        ctx.out(dim(`  recent: ${recent.slice(0, 6).join(", ")}`));
+      const currentProfile = getActiveProfile(loadStore());
+      const selection = await selectModel({
+        ask: ctx.ask,
+        pick: ctx.pick,
+        provider: ctx.state.config.provider,
+        apiKey: ctx.state.config.apiKey,
+        ...(ctx.state.config.baseURL ? { baseURL: ctx.state.config.baseURL } : {}),
+        currentModel: ctx.state.config.model,
+        recentModels: currentProfile?.recentModels ?? [],
+        discover: shouldDiscoverModels({
+          apiKey: ctx.state.config.apiKey,
+        }),
+        manualPrompt: `Model [${ctx.state.config.model}]: `,
+        choosePrompt: "  Choose a model",
+      });
+      if (!selection.model || selection.model === ctx.state.config.model) {
+        ctx.out(
+          `  ${dim("model")} ${ctx.state.config.model} ${dim(`(${modelHint(ctx.state.config.model)})`)}`,
+        );
+        const recent = activeRecentModels(ctx);
+        if (recent.length > 1) {
+          ctx.out(dim(`  recent: ${recent.slice(0, 6).join(", ")}`));
+        }
+        return {};
       }
+      return setModel(ctx, selection.model);
+    }
+    return setModel(ctx, value);
+  },
+};
+
+const mcpCommand: SlashCommand = {
+  name: "mcp",
+  description: "Show configured MCP servers",
+  subcommands: ["list"],
+  async run(ctx, args) {
+    const sub = (args[0] ?? "list").trim().toLowerCase();
+    if (sub !== "list") {
+      ctx.out(red(`  Unknown subcommand "/mcp ${args[0]}". Try: list.`));
       return {};
     }
-    // Set the model and record it as most-recently-used (feature #8).
-    const store = loadStore();
-    const current = getActiveProfile(store);
-    if (current) {
-      const next = rememberModel({ ...current, model: value }, value);
-      if (patchActiveProfile(ctx, next)) {
-        ctx.out(green(`  Model set to "${value}".`));
-      }
-    } else if (patchActiveProfile(ctx, { model: value })) {
-      ctx.out(green(`  Model set to "${value}".`));
+    const defs = loadMcpServerDefinitions(ctx.state.config.workdir);
+    if (defs.length === 0) {
+      ctx.out(dim("  No MCP servers configured. Add JSON files under .agents/mcp or .agent/mcp."));
+      return {};
     }
+    ctx.out(bold("  MCP servers"));
+    for (const def of defs) {
+      ctx.out(
+        `  ${cyan(def.name.padEnd(16))} ${dim(
+          `${def.command}${def.args?.length ? ` ${def.args.join(" ")}` : ""} (${def.scope})`,
+        )}`,
+      );
+      if (def.description) ctx.out(`  ${dim(" ".repeat(18) + def.description)}`);
+    }
+    ctx.out(dim("  The agent can load matching tools on demand with mcp_search."));
     return {};
   },
 };
@@ -781,6 +958,45 @@ function activeRecentModels(ctx: CommandContext): string[] {
   const store = loadStore();
   const current = getActiveProfile(store);
   return current?.recentModels ?? [];
+}
+
+/**
+ * Try remote model discovery whenever we have credentials.
+ *
+ * This keeps `/model` and `/profile edit` useful with official endpoints too,
+ * not only with an explicit custom base URL. A failed lookup already falls back
+ * to current/recent/manual selection, so the downside is limited to one best-
+ * effort network call.
+ */
+function shouldDiscoverModels(source: {
+  apiKey: string;
+}): boolean {
+  return source.apiKey.trim().length > 0;
+}
+
+async function setModel(
+  ctx: CommandContext,
+  model: string,
+): Promise<{ exit?: boolean }> {
+  const trimmed = model.trim();
+  if (!trimmed) {
+    ctx.out(red("  Model name cannot be empty."));
+    return {};
+  }
+
+  const store = loadStore();
+  const current = getActiveProfile(store);
+  if (current) {
+    const next = rememberModel({ ...current, model: trimmed }, trimmed);
+    if (patchActiveProfile(ctx, next)) {
+      ctx.out(green(`  Model set to "${trimmed}".`));
+    }
+    return {};
+  }
+
+  ctx.state.config = { ...ctx.state.config, model: trimmed };
+  ctx.out(green(`  Model set to "${trimmed}" (session only).`));
+  return {};
 }
 
 /**
@@ -796,25 +1012,11 @@ const skillCommand: SlashCommand = {
   async run(ctx, args) {
     const skills = loadSkills(ctx.state.config.workdir);
     if (skills.size === 0) {
-      ctx.out(dim("  No skills found. Add files under .agent/skills/."));
+      ctx.out(dim("  No skills found. Add files under .agents/skills/ or .agent/skills/."));
       return {};
     }
     let name = (args[0] ?? "").trim().toLowerCase();
-    if (!name && ctx.pick) {
-      const choice = await ctx.pick(
-        "  Load which skill?",
-        [...skills.values()].map((s) => ({
-          label: s.name,
-          value: s.name,
-          hint: `${s.description} (${s.scope})`,
-        })),
-      );
-      if (!choice) {
-        ctx.out(dim("  Cancelled."));
-        return {};
-      }
-      name = choice;
-    } else if (!name) {
+    if (!name) {
       ctx.out(bold("  Skills"));
       for (const s of skills.values()) {
         ctx.out(`  ${cyan(s.name.padEnd(16))} ${dim(`${s.description} (${s.scope})`)}`);
@@ -827,10 +1029,12 @@ const skillCommand: SlashCommand = {
       ctx.out(red(`  No skill "${name}". Type /skill to list.`));
       return {};
     }
-    ctx.state.pendingContext.push(
-      `# Skill: ${skill.name}\n\n${skill.body}`,
+    ctx.state.pendingContext.push(`# Skill: ${skill.name}\n\n${skill.body}`);
+    ctx.out(
+      green(
+        `  Loaded skill "${skill.name}" — only your next message will include its content.`,
+      ),
     );
-    ctx.out(green(`  Loaded skill "${skill.name}" — it'll inform your next message.`));
     return {};
   },
 };
@@ -839,7 +1043,7 @@ const skillCommand: SlashCommand = {
 function reloadCommand(reg: CommandRegistry): SlashCommand {
   return {
     name: "reload",
-    description: "Re-scan .agent dirs for skills and custom commands",
+    description: "Re-scan .agents/.agent dirs for skills and custom commands",
     async run(ctx) {
       const defs = loadCustomCommandDefs(ctx.state.config.workdir);
       for (const c of buildCustomCommands(defs)) reg.register(c);
@@ -887,9 +1091,9 @@ const BUILTINS: SlashCommand[] = [
   todoCommand,
   configCommand,
   usageCommand,
-  profilesCommand,
   profileCommand,
   modelCommand,
+  mcpCommand,
   thinkingCommand,
   skillCommand,
   resumeCommand,

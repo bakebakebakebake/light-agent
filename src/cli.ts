@@ -30,6 +30,8 @@ import type { Message } from "./model/types.js";
 import type { LoopStopReason } from "./loop/types.js";
 import type { SubagentRequest, SubagentResult } from "./subagents.js";
 import { LocalMcpRuntime } from "./mcp/runtime.js";
+import { estimateContextTokens } from "./model/contextEstimate.js";
+import { formatContextPercent } from "./ui/status.js";
 
 /**
  * CLI entry — the REPL that wires every module together (docs/01, docs/08).
@@ -122,6 +124,17 @@ async function main(): Promise<void> {
     session: newSession({ provider: config.provider, model: config.model }),
     mode: policy.getMode(),
     usage: { input: 0, output: 0 },
+    estimateContext() {
+      const extraContext = this.pendingContext.join("\n\n");
+      const system = extraContext
+        ? systemPrompt(this.config.workdir) + "\n\n" + extraContext
+        : systemPrompt(this.config.workdir);
+      return estimateContextTokens({
+        system,
+        messages: this.history,
+        tools: registry.specs(),
+      });
+    },
     todos: [],
     pendingContext: [],
     rebuild() {
@@ -155,8 +168,9 @@ async function main(): Promise<void> {
     },
   };
 
-  // The renderer streams loop events; its onUsage hook records the last turn's
-  // input-token count as the current context size for the status line (#7).
+  // The renderer streams loop events; its onUsage hook records the provider's
+  // last-call usage for diagnostics while UI context uses a local whole-prompt
+  // estimate.
   const renderer = new Renderer({
     onUsage: (u) => {
       state.usage = { input: u.inputTokens, output: u.outputTokens };
@@ -293,7 +307,7 @@ async function main(): Promise<void> {
         statusLine({
           model: state.config.model,
           mode: state.mode,
-          used: state.usage.input,
+          used: state.estimateContext(),
           total: contextWindowFor(state.config.model, state.config.contextWindow),
           thinking: state.config.thinkingDepth ?? "off",
         }) + "\n",
@@ -392,9 +406,9 @@ async function main(): Promise<void> {
     // Auto-save the conversation after each turn so it can be resumed later.
     state.save();
 
-    // Auto-compact when the last turn pushed context past the threshold (#1).
-    // Uses the recorded input-token count vs the model's window; runs the same
-    // machinery as /compact, then reprints so the shorter state is visible.
+    // Auto-compact when the live prompt estimate nears the context threshold.
+    // Runs the same machinery as /compact, then reprints so the shorter state
+    // is visible.
     await maybeAutoCompact(state, stdout.write.bind(stdout));
 
     stdout.write("\n");
@@ -409,9 +423,9 @@ const COMPACT_THRESHOLD = 0.85;
 const DEFAULT_SUBAGENT_TOOLS = ["read", "ls", "grep", "glob", "todo_read"] as const;
 
 /**
- * If the last turn's input tokens crossed COMPACT_THRESHOLD of the model's
- * context window, summarize older turns in place and reprint the conversation.
- * No-op below the threshold or when there's too little history to compact.
+ * If the live prompt estimate crosses COMPACT_THRESHOLD of the model's context
+ * window, summarize older turns in place and reprint the conversation. No-op
+ * below the threshold or when there's too little history to compact.
  */
 async function maybeAutoCompact(
   state: SessionState,
@@ -419,12 +433,13 @@ async function maybeAutoCompact(
 ): Promise<void> {
   const total = contextWindowFor(state.config.model, state.config.contextWindow);
   if (total <= 0) return;
-  const frac = state.usage.input / total;
+  const used = state.estimateContext();
+  const frac = used / total;
   if (frac < COMPACT_THRESHOLD) return;
 
   write(
     dim(
-      `\n  Context at ${Math.round(frac * 100)}% — compacting older turns…\n`,
+      `\n  Context at ${formatContextPercent(used, total)} — compacting older turns…\n`,
     ),
   );
   let result;

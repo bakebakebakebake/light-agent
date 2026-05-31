@@ -6,6 +6,10 @@ import {
   setActive,
   type Profile,
 } from "./profiles.js";
+import {
+  selectModel,
+  type Ask as ModelAsk,
+} from "./model/selection.js";
 import { fetchModels as defaultFetchModels, type FetchModels } from "./model/models.js";
 
 /**
@@ -23,10 +27,7 @@ import { fetchModels as defaultFetchModels, type FetchModels } from "./model/mod
 
 /** A prompt function (cli.ts passes one backed by readline). The optional
  * `secret` flag asks the caller to mask echo for sensitive input (API keys). */
-export type Ask = (
-  prompt: string,
-  opts?: { secret?: boolean },
-) => Promise<string>;
+export type Ask = ModelAsk;
 
 /** The env vars the wizard resolved, ready to apply + persist. */
 export interface OnboardingResult {
@@ -63,66 +64,6 @@ export async function collectOnboarding(
   return collectAnthropic(ask, fetch);
 }
 
-/**
- * Resolve a model id: try fetching the provider's list and let the user pick a
- * number (or type a name); fall back to `manual()` when the list can't be
- * fetched or is empty. `recent` model ids float to the top of the list so
- * frequently-used models are one keystroke away (feature #8).
- */
-async function pickModel(
-  ask: Ask,
-  fetch: FetchModels,
-  opts: {
-    provider: "anthropic" | "openai";
-    apiKey: string;
-    baseURL?: string;
-    recent?: string[];
-  },
-  manual: () => Promise<string>,
-): Promise<string> {
-  let result;
-  try {
-    result = await fetch({
-      provider: opts.provider,
-      apiKey: opts.apiKey,
-      ...(opts.baseURL ? { baseURL: opts.baseURL } : {}),
-    });
-  } catch {
-    result = { models: [] as string[] };
-  }
-  const models = orderModels(result.models, opts.recent ?? []);
-  if (models.length === 0) {
-    // No list (offline, bad key, or unsupported endpoint) → type it in.
-    return manual();
-  }
-
-  const shown = models.slice(0, 30);
-  const list = shown.map((m, i) => `  ${i + 1}) ${m}`).join("\n");
-  const answer = (
-    await ask(
-      `Available models:\n${list}\n` +
-        `Select a number [1], or type a model name: `,
-    )
-  ).trim();
-
-  if (!answer) return shown[0] ?? (await manual());
-  const n = Number(answer);
-  if (Number.isInteger(n) && n >= 1 && n <= shown.length) {
-    return shown[n - 1] ?? (await manual());
-  }
-  // Anything else is treated as a literal model id the user typed.
-  return answer;
-}
-
-/** Put `recent` ids first (in recent order), then the rest, de-duplicated. */
-function orderModels(models: string[], recent: string[]): string[] {
-  const set = new Set(models);
-  const head = recent.filter((m) => set.has(m));
-  const seen = new Set(head);
-  const tail = models.filter((m) => !seen.has(m));
-  return [...head, ...tail];
-}
-
 async function collectAnthropic(
   ask: Ask,
   fetch: FetchModels,
@@ -135,14 +76,19 @@ async function collectAnthropic(
       "Base URL (optional — leave blank for the official endpoint): ",
     )
   ).trim();
-  const model = await pickModel(
-    ask,
-    fetch,
-    { provider: "anthropic", apiKey, ...(baseURL ? { baseURL } : {}) },
-    async () =>
-      (await ask(`Model [${DEFAULT_ANTHROPIC_MODEL}]: `)).trim() ||
-      DEFAULT_ANTHROPIC_MODEL,
-  );
+  const model = (
+    await selectModel({
+      ask,
+      fetch,
+      provider: "anthropic",
+      apiKey,
+      ...(baseURL ? { baseURL } : {}),
+      defaultModel: DEFAULT_ANTHROPIC_MODEL,
+      discover: true,
+      manualPrompt: `Model [${DEFAULT_ANTHROPIC_MODEL}]: `,
+      choosePrompt: "Available models",
+    })
+  ).model;
 
   const entries: Record<string, string> = {
     HARNESS_PROVIDER: "anthropic",
@@ -164,20 +110,19 @@ async function collectOpenAI(
       "Base URL (e.g. https://api.deepseek.com/v1 — blank for OpenAI): ",
     )
   ).trim();
-  // Model is required for OpenAI-compatible providers: there is no default, so
-  // the manual fallback re-prompts until a non-empty value is given.
-  const model = await pickModel(
-    ask,
-    fetch,
-    { provider: "openai", apiKey, ...(baseURL ? { baseURL } : {}) },
-    async () => {
-      let m = "";
-      while (!m) {
-        m = (await ask('Model (required, e.g. "deepseek-chat"): ')).trim();
-      }
-      return m;
-    },
-  );
+  const model = (
+    await selectModel({
+      ask,
+      fetch,
+      provider: "openai",
+      apiKey,
+      ...(baseURL ? { baseURL } : {}),
+      discover: true,
+      manualPrompt: 'Model (required, e.g. "deepseek-chat"): ',
+      manualRequired: true,
+      choosePrompt: "Available models",
+    })
+  ).model;
 
   const entries: Record<string, string> = {
     HARNESS_PROVIDER: "openai",

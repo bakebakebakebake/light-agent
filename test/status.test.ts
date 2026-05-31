@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { statusBlock, statusLine, tildify, humanTokens } from "../src/ui/status.js";
+import {
+  statusBlock,
+  statusLine,
+  tildify,
+  humanTokens,
+  formatContextPercent,
+} from "../src/ui/status.js";
 import { homedir } from "node:os";
 
 /** Strip ANSI so we can assert on visible content + alignment. */
@@ -104,10 +110,31 @@ describe("statusLine", () => {
     expect(high).toContain("62% context");
   });
 
+  it("shows one decimal place below one percent", () => {
+    const out = plain(
+      statusLine({ model: "m", mode: "default", used: 734, total: 1_000_000 }),
+    );
+    expect(out).toContain("0.1% context");
+  });
+
   it("renders a single line", () => {
     const out = plain(
       statusLine({ model: "m", mode: "allowAll", used: 80, total: 100 }),
     );
     expect(out.split("\n")).toHaveLength(1);
+  });
+});
+
+describe("formatContextPercent", () => {
+  it("keeps 0% at zero", () => {
+    expect(formatContextPercent(0, 100)).toBe("0%");
+  });
+
+  it("shows one decimal place between 0 and 1 percent", () => {
+    expect(formatContextPercent(734, 1_000_000)).toBe("0.1%");
+  });
+
+  it("rounds to whole percents at or above one percent", () => {
+    expect(formatContextPercent(12_300, 128_000)).toBe("10%");
   });
 });

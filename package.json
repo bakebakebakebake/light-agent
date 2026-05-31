@@ -1,6 +1,6 @@
 {
   "name": "harness-agent",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "A minimal coding agent CLI built from the docs/ architecture reference",

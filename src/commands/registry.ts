@@ -4,6 +4,7 @@ import type { Message } from "../model/types.js";
 import type { Session } from "../sessions.js";
 import type { PermissionMode } from "../permissions/policy.js";
 import type { TodoItem } from "../todos.js";
+import { fuzzyScore } from "../ui/menu.js";
 
 /**
  * Slash-command system (docs/08).
@@ -32,6 +33,8 @@ export interface SessionState {
   mode: PermissionMode;
   /** Approx context usage from the last turn (feature #7). */
   usage: { input: number; output: number };
+  /** Local estimate of the whole prompt footprint for the next turn. */
+  estimateContext(): number;
   /** Session-scoped todo list shown via /todo and persisted in the session. */
   todos: TodoItem[];
   /**
@@ -86,6 +89,8 @@ export interface PickItem {
   label: string;
   value: string;
   hint?: string;
+  selectable?: boolean;
+  tone?: "green" | "dim";
 }
 
 /** A candidate row for the live `/` menu (B1). */
@@ -194,7 +199,13 @@ export class CommandRegistry {
     if (!line.startsWith("/")) return null;
     const raw = line.slice(1);
     if (/\s/.test(raw)) return null; // past the command name → no menu
-    const matches = this.ordered.filter((c) => c.name.startsWith(raw));
+    const matches = this.ordered.filter((c) => {
+      if (!raw) return true;
+      return (
+        fuzzyScore(c.name, raw) !== null ||
+        fuzzyScore(c.description, raw) !== null
+      );
+    });
     if (matches.length === 0) return null;
     return matches.map((c) => ({
       label: "/" + c.name,

@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildRegistry } from "../src/commands/builtins.js";
@@ -19,6 +19,7 @@ import type { ModelProvider } from "../src/model/types.js";
 import { newSession, saveSession } from "../src/sessions.js";
 
 const SAVED = { ...process.env };
+const realFetch = global.fetch;
 afterEach(() => {
   for (const k of Object.keys(process.env)) {
     if (!(k in SAVED)) delete process.env[k];
@@ -26,12 +27,23 @@ afterEach(() => {
   Object.assign(process.env, SAVED);
   delete process.env.HARNESS_HOME;
   delete process.env.HARNESS_PROFILE;
+  global.fetch = realFetch;
+  vi.restoreAllMocks();
 });
 
 function isolated(): string {
   const home = mkdtempSync(join(tmpdir(), "hh-"));
   process.env.HARNESS_HOME = home;
   return home;
+}
+
+function mockModelFetch(models: string[]): void {
+  global.fetch = (async () =>
+    ({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: models.map((id) => ({ id })) }),
+    }) as Response) as typeof fetch;
 }
 
 const fakeProvider: ModelProvider = {
@@ -82,6 +94,9 @@ function makeCtx(answers: string[] = []): {
     session: newSession(),
     mode: "default",
     usage: { input: 0, output: 0 },
+    estimateContext() {
+      return 0;
+    },
     todos: [],
     pendingContext: [],
     rebuild() {
@@ -160,6 +175,20 @@ describe("dispatch parsing", () => {
     expect(output()).toContain("[x] Inspect files");
     expect(output()).toContain("[~] Add tests");
   });
+
+  it("shows whole-context usage separately from last-call usage", async () => {
+    isolated();
+    const reg = buildRegistry();
+    const { ctx, state, output } = makeCtx();
+    state.usage = { input: 734, output: 213 };
+    state.estimateContext = () => 52_400;
+    await reg.dispatch("/usage", ctx);
+    const out = output();
+    expect(out).toContain("52.4k");
+    expect(out).toContain("734 in");
+    expect(out).toContain("213 out");
+    expect(out).toContain("last call");
+  });
 });
 
 describe("/config masks the key", () => {
@@ -202,14 +231,43 @@ describe("/model", () => {
     expect(loadStore().profiles.claude!.model).toBe("claude-opus-4");
   });
 
-  it("refuses to set a model with no active profile (env fallback)", async () => {
+  it("sets the model for this session when no active profile is stored", async () => {
     isolated(); // empty store
     process.env.ANTHROPIC_API_KEY = "sk-env";
     const reg = buildRegistry();
-    const { ctx, output, rebuildCalls } = makeCtx();
+    const { ctx, state, output, rebuildCalls } = makeCtx();
     await reg.dispatch("/model x", ctx);
-    expect(output()).toMatch(/No active profile/);
+    expect(output()).toMatch(/session only/);
     expect(rebuildCalls()).toBe(0);
+    expect(state.config.model).toBe("x");
+  });
+
+  it("lets the picker switch to a recent model", async () => {
+    isolated();
+    const store = loadStore();
+    upsertProfile(store, "claude", {
+      ...profileA,
+      recentModels: [profileA.model, "claude-opus-4"],
+    });
+    saveStore(store);
+    const reg = buildRegistry();
+    const { ctx, rebuildCalls } = makeCtx(["claude-opus-4"]);
+    await reg.dispatch("/model", ctx);
+    expect(rebuildCalls()).toBe(1);
+    expect(loadStore().profiles.claude!.model).toBe("claude-opus-4");
+  });
+
+  it("fetches models for the default endpoint and lets the picker choose one", async () => {
+    isolated();
+    const store = loadStore();
+    upsertProfile(store, "claude", profileA);
+    saveStore(store);
+    mockModelFetch([profileA.model, "claude-opus-4"]);
+    const reg = buildRegistry();
+    const { ctx, rebuildCalls } = makeCtx(["claude-opus-4"]);
+    await reg.dispatch("/model", ctx);
+    expect(rebuildCalls()).toBe(1);
+    expect(loadStore().profiles.claude!.model).toBe("claude-opus-4");
   });
 });
 
@@ -220,8 +278,8 @@ describe("/profile edit (replaces /baseurl and /key)", () => {
     upsertProfile(store, "ds", profileB);
     saveStore(store);
     const reg = buildRegistry();
-    // profileEdit asks: Model, Base URL, API key — blank keeps the current.
-    const { ctx } = makeCtx(["", "https://new.example/v1", ""]);
+    mockModelFetch([profileB.model, "deepseek-v4-chat"]);
+    const { ctx } = makeCtx(["https://new.example/v1", ""]);
     await reg.dispatch("/profile edit ds", ctx);
     expect(loadStore().profiles.ds!.baseURL).toBe("https://new.example/v1");
   });
@@ -232,11 +290,105 @@ describe("/profile edit (replaces /baseurl and /key)", () => {
     upsertProfile(store, "ds", profileB);
     saveStore(store);
     const reg = buildRegistry();
-    // Keep model + base URL, change only the (secret) key.
-    const { ctx, output } = makeCtx(["", "", "sk-brand-new-secret-9999"]);
+    mockModelFetch([profileB.model, "deepseek-v4-chat"]);
+    const { ctx, output } = makeCtx(["", "sk-brand-new-secret-9999"]);
     await reg.dispatch("/profile edit ds", ctx);
     expect(loadStore().profiles.ds!.apiKey).toBe("sk-brand-new-secret-9999");
     expect(output()).not.toContain("sk-brand-new-secret-9999"); // never echoed
+  });
+
+  it("auto-discovers models after reading the current key and endpoint", async () => {
+    isolated();
+    const store = loadStore();
+    upsertProfile(store, "claude", profileA);
+    saveStore(store);
+    mockModelFetch([profileA.model, "claude-opus-4"]);
+    const reg = buildRegistry();
+    const { ctx } = makeCtx(["", "", "claude-opus-4"]);
+    await reg.dispatch("/profile edit claude", ctx);
+    expect(loadStore().profiles.claude!.model).toBe("claude-opus-4");
+  });
+});
+
+describe("/profile picker and alias", () => {
+  it("uses the picker home screen to switch profiles", async () => {
+    isolated();
+    const store = loadStore();
+    upsertProfile(store, "a", profileA);
+    upsertProfile(store, "b", profileB);
+    saveStore(store);
+    const reg = buildRegistry();
+    const { ctx, state, rebuildCalls } = makeCtx(["use:b"]);
+    await reg.dispatch("/profile", ctx);
+    expect(loadStore().activeProfile).toBe("b");
+    expect(state.profileName).toBe("b");
+    expect(rebuildCalls()).toBe(1);
+  });
+
+  it("groups profiles and actions, and marks the active row green", async () => {
+    isolated();
+    const store = loadStore();
+    upsertProfile(store, "a", profileA);
+    upsertProfile(store, "b", profileB);
+    saveStore(store);
+    const reg = buildRegistry();
+    const { ctx } = makeCtx();
+    let prompt = "";
+    let seen: Array<{
+      label: string;
+      value: string;
+      hint?: string;
+      selectable?: boolean;
+      tone?: "green" | "dim";
+    }> = [];
+    ctx.pick = async (pickedPrompt, items) => {
+      prompt = pickedPrompt;
+      seen = items;
+      return null;
+    };
+    await reg.dispatch("/profile", ctx);
+    expect(prompt).toContain("Choose a profile");
+    expect(seen[0]).toMatchObject({
+      label: "Profiles",
+      selectable: false,
+      tone: "dim",
+    });
+    expect(seen.find((item) => item.value === "use:a")).toMatchObject({
+      label: "a (active)",
+      tone: "green",
+    });
+    expect(seen.find((item) => item.value === "__actions__")).toMatchObject({
+      label: "Actions",
+      selectable: false,
+      tone: "dim",
+    });
+    expect(seen.find((item) => item.value === "edit")?.hint).toBe("a");
+    expect(seen.find((item) => item.value === "rm")?.hint).toBe("a");
+  });
+
+  it("shows grouped fallback output and omits edit/remove without an active profile", async () => {
+    isolated();
+    const reg = buildRegistry();
+    const { ctx, output } = makeCtx();
+    ctx.pick = undefined;
+    await reg.dispatch("/profile", ctx);
+    const out = output();
+    expect(out).toContain("Profiles");
+    expect(out).toContain("Actions");
+    expect(out).toContain("New profile");
+    expect(out).not.toContain("Edit active profile");
+    expect(out).not.toContain("Remove active profile");
+  });
+
+  it("keeps /profiles as an alias of /profile", async () => {
+    isolated();
+    const store = loadStore();
+    upsertProfile(store, "a", profileA);
+    saveStore(store);
+    const reg = buildRegistry();
+    const { ctx, output } = makeCtx();
+    await reg.dispatch("/profiles list", ctx);
+    expect(output()).toContain("a");
   });
 });
 
@@ -322,6 +474,69 @@ describe("/clear and /resume todo state", () => {
   });
 });
 
+describe("/mcp", () => {
+  it("lists configured MCP servers from .agents/mcp", async () => {
+    isolated();
+    const root = mkdtempSync(join(tmpdir(), "mcp-"));
+    mkdirSync(join(root, ".agents", "mcp"), { recursive: true });
+    writeFileSync(
+      join(root, ".agents", "mcp", "docs.json"),
+      JSON.stringify({
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-filesystem"],
+        description: "Docs server",
+      }),
+    );
+    const reg = buildRegistry();
+    const { ctx, state, output } = makeCtx();
+    state.config.workdir = root;
+    await reg.dispatch("/mcp", ctx);
+    const out = output();
+    expect(out).toContain("MCP servers");
+    expect(out).toContain("docs");
+    expect(out).toContain("Docs server");
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("/skill", () => {
+  it("lists loaded skill names and descriptions", async () => {
+    isolated();
+    const root = mkdtempSync(join(tmpdir(), "skills-"));
+    mkdirSync(join(root, ".agents", "skills", "review"), { recursive: true });
+    writeFileSync(
+      join(root, ".agents", "skills", "review", "SKILL.md"),
+      "---\nname: review\ndescription: code review helper\n---\nReview carefully.",
+    );
+    const reg = buildRegistry();
+    const { ctx, state, output } = makeCtx();
+    state.config.workdir = root;
+    await reg.dispatch("/skill", ctx);
+    const out = output();
+    expect(out).toContain("review");
+    expect(out).toContain("code review helper");
+    expect(out).toContain("Load with /skill <name>.");
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("injects only the selected skill body into pendingContext", async () => {
+    isolated();
+    const root = mkdtempSync(join(tmpdir(), "skills-"));
+    mkdirSync(join(root, ".agents", "skills", "review"), { recursive: true });
+    writeFileSync(
+      join(root, ".agents", "skills", "review", "SKILL.md"),
+      "---\nname: review\ndescription: code review helper\n---\nReview carefully.",
+    );
+    const reg = buildRegistry();
+    const { ctx, state, output } = makeCtx();
+    state.config.workdir = root;
+    await reg.dispatch("/skill review", ctx);
+    expect(state.pendingContext).toEqual(["# Skill: review\n\nReview carefully."]);
+    expect(output()).toContain("only your next message will include its content");
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
 describe("/clear", () => {
   it("empties history", async () => {
     isolated();
@@ -350,6 +565,14 @@ describe("/mode", () => {
     const reg = buildRegistry();
     const { ctx, state } = makeCtx();
     await reg.dispatch("/mode plan", ctx);
+    expect(state.mode).toBe("plan");
+  });
+
+  it("uses the picker when no argument is given", async () => {
+    isolated();
+    const reg = buildRegistry();
+    const { ctx, state } = makeCtx(["plan"]);
+    await reg.dispatch("/mode", ctx);
     expect(state.mode).toBe("plan");
   });
 

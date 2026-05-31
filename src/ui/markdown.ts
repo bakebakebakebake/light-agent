@@ -91,17 +91,14 @@ function feedLine(line: string, st: RenderState): string {
     if (st.inFence) {
       st.inFence = false;
       st.fenceLang = "";
-      return gray("└" + "─".repeat(12)); // closing rule
+      return "";
     }
     // Opening fence: flush any forming table first, then start the block.
     const pre = flushTable(st);
     st.inFence = true;
     st.fenceLang = (fence[1] ?? "").trim().toLowerCase();
-    // Header rule carries the language label; body lines get NO per-line gutter
-    // so the code can be selected/copied cleanly (#2). The header/footer rules
-    // sit on their own lines, outside any body-line selection.
     const label = st.fenceLang || "code";
-    const head = gray("┌── ") + dim(label) + gray(" " + "─".repeat(8));
+    const head = dim(label);
     return pre ? pre + "\n" + head : head;
   }
   if (st.inFence) {

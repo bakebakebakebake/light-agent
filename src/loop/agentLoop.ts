@@ -172,7 +172,9 @@ export async function* runAgentLoop(
         input: c.input,
       });
     }
-    messages.push({ role: "assistant", content: assistantBlocks });
+    if (assistantBlocks.length > 0) {
+      messages.push({ role: "assistant", content: assistantBlocks });
+    }
 
     // --- no tool calls → final answer, normal stop ---
     if (calls.length === 0) {
@@ -251,7 +253,9 @@ export async function* runAgentLoop(
       });
     }
 
-    messages.push({ role: "user", content: resultBlocks });
+    if (resultBlocks.length > 0) {
+      messages.push({ role: "user", content: resultBlocks });
+    }
     // loop continues: results go back to the model
   }
 }

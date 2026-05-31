@@ -1,6 +1,6 @@
 import { stdout } from "node:process";
 import type { Key, KeySource } from "./keys.js";
-import { renderMenu, type MenuRow } from "./menu.js";
+import { filterMenuRows, renderMenu, type MenuRow } from "./menu.js";
 import { visibleWidth, dim, gray, yellow, cyan } from "./theme.js";
 import { frameInput, frameInnerWidth, inputBorderTone } from "./frame.js";
 
@@ -27,6 +27,8 @@ export interface EditorMenuItem {
   label: string;
   value: string;
   hint?: string;
+  selectable?: boolean;
+  tone?: "green" | "dim";
 }
 
 export interface EditorOptions {
@@ -92,12 +94,172 @@ export function runEditor(opts: EditorOptions): Promise<EditorResult> {
 }
 
 type Mode = "edit" | "menu" | "pick" | "secret";
+type RenderKind = "frame" | "pick" | "hint";
+
+export interface RenderView {
+  kind: RenderKind;
+  rows: string[];
+  cursorRowInRegion: number;
+  targetCol: number;
+  collapseRows: string[];
+  structureKey: string;
+}
+
+export interface RenderViewOptions {
+  prompt: string;
+  lines: string[];
+  row: number;
+  col: number;
+  mode: Mode;
+  cols: number;
+  menuItems?: EditorMenuItem[];
+  menuSel?: number;
+  footer?: string;
+  planMode?: boolean;
+  pickQuery?: string;
+}
+
+export function changedRowIndices(prev: string[], next: string[]): number[] {
+  const out: number[] = [];
+  const total = Math.max(prev.length, next.length);
+  for (let i = 0; i < total; i++) {
+    if (prev[i] !== next[i]) out.push(i);
+  }
+  return out;
+}
+
+export function shouldFullRedraw(prev: RenderView | null, next: RenderView): boolean {
+  if (!prev) return true;
+  if (prev.kind !== next.kind) return true;
+  if (prev.rows.length !== next.rows.length) return true;
+  return prev.structureKey !== next.structureKey;
+}
+
+function plainCollapseRows(prompt: string, lines: string[], mode: Mode): string[] {
+  if (mode === "secret") {
+    return [prompt + "•".repeat((lines[0] ?? "").length)];
+  }
+  if (mode === "pick") {
+    return [prompt];
+  }
+  return lines.map((line, i) => (i === 0 ? prompt : "  ") + line);
+}
+
+function menuRowsOf(items: EditorMenuItem[]): MenuRow[] {
+  return items.map((item) => ({
+    label: item.label,
+    hint: item.hint,
+    selectable: item.selectable,
+    tone: item.tone,
+  }));
+}
+
+export function buildRenderView(opts: RenderViewOptions): RenderView {
+  const collapseRows = plainCollapseRows(opts.prompt, opts.lines, opts.mode);
+  if (opts.mode === "pick") {
+    const prompt = opts.pickQuery ? opts.prompt + dim(` [${opts.pickQuery}]`) : opts.prompt;
+    const menu = renderMenu(menuRowsOf(opts.menuItems ?? []), opts.menuSel ?? 0, undefined, opts.cols);
+    return {
+      kind: "pick",
+      rows: [prompt, ...menu.rows],
+      cursorRowInRegion: 0,
+      targetCol: visibleWidth(prompt),
+      collapseRows,
+      structureKey: `pick|items:${menu.rows.length}`,
+    };
+  }
+
+  const promptWidth = visibleWidth(opts.prompt);
+  const restPrefix = "  ";
+  const restPrefixWidth = visibleWidth(restPrefix);
+  const inner = frameInnerWidth([opts.prompt], opts.cols);
+  const firstWidth = Math.max(1, inner - promptWidth);
+  const restWidth = Math.max(1, inner - restPrefixWidth);
+
+  if (opts.mode === "secret") {
+    const full = opts.lines[0] ?? "";
+    const masked = "•".repeat(full.length);
+    const left = "•".repeat(opts.col);
+    const rows = wrapTextRows(masked, firstWidth, restWidth);
+    const leftRows = wrapTextRows(left, firstWidth, restWidth);
+    const framed = frameInput(
+      rows.map((row, i) => (i === 0 ? opts.prompt : restPrefix) + row),
+      gray,
+      inner,
+    );
+    return {
+      kind: "frame",
+      rows: framed,
+      cursorRowInRegion: 1 + leftRows.length - 1,
+      targetCol:
+        2 +
+        (leftRows.length === 1 ? promptWidth : restPrefixWidth) +
+        visibleWidth(leftRows[leftRows.length - 1] ?? ""),
+      collapseRows,
+      structureKey: `frame|secret|content:${rows.length}|footer:${opts.footer ? 1 : 0}`,
+    };
+  }
+
+  const contentRows: string[] = [];
+  let rowOffset = 0;
+  let cursorRow = 0;
+  let cursorCol = promptWidth;
+  for (let i = 0; i < opts.lines.length; i++) {
+    const text = opts.lines[i] ?? "";
+    const prefix = i === 0 ? opts.prompt : restPrefix;
+    const prefixWidth = i === 0 ? promptWidth : restPrefixWidth;
+    const wrapped = wrapTextRows(text, i === 0 ? firstWidth : restWidth, restWidth);
+    for (let j = 0; j < wrapped.length; j++) {
+      contentRows.push((j === 0 ? prefix : restPrefix) + wrapped[j]);
+    }
+    if (i === opts.row) {
+      const left = text.slice(0, opts.col);
+      const leftRows = wrapTextRows(left, i === 0 ? firstWidth : restWidth, restWidth);
+      cursorRow = rowOffset + leftRows.length - 1;
+      cursorCol =
+        (leftRows.length === 1 ? prefixWidth : restPrefixWidth) +
+        visibleWidth(leftRows[leftRows.length - 1] ?? "");
+    }
+    rowOffset += wrapped.length;
+  }
+
+  const tone = inputBorderTone(opts.lines[0] ?? "", opts.planMode ?? false);
+  const color = tone === "shell" ? yellow : tone === "plan" ? cyan : gray;
+  const rows = frameInput(contentRows, color, inner);
+  const menu = opts.mode === "menu"
+    ? renderMenu(menuRowsOf(opts.menuItems ?? []), opts.menuSel ?? 0, undefined, opts.cols)
+    : { rows: [] as string[] };
+  const footerRows = opts.footer ? [opts.footer] : [];
+
+  return {
+    kind: "frame",
+    rows: [...rows, ...menu.rows, ...footerRows],
+    cursorRowInRegion: 1 + cursorRow,
+    targetCol: 2 + cursorCol,
+    collapseRows,
+    structureKey:
+      `frame|tone:${tone}|content:${contentRows.length}|menu:${menu.rows.length}|footer:${footerRows.length}`,
+  };
+}
+
+export function buildHintView(prompt: string, lines: string[], hint: string): RenderView {
+  const promptLine = prompt + (lines[0] ?? "");
+  return {
+    kind: "hint",
+    rows: [promptLine, "  " + hint],
+    cursorRowInRegion: 0,
+    targetCol: visibleWidth(promptLine),
+    collapseRows: plainCollapseRows(prompt, lines, "edit"),
+    structureKey: "hint|rows:2",
+  };
+}
 
 class Editor {
   private lines: string[] = [""];
   private row = 0;
   private col = 0;
-  private lastRows = 0;
+  private lastRenderedRows: string[] = [];
+  private lastView: RenderView | null = null;
   /**
    * Which row (0-indexed from the top of the drawn region) the cursor was left
    * on after the previous draw. The old code assumed the cursor sat at the
@@ -121,6 +283,8 @@ class Editor {
   private lastCtrlC = 0;
   /** Timestamp of the first Esc press in a slash-command context. */
   private lastEsc = 0;
+  private pickItemsBase: EditorMenuItem[] = [];
+  private pickQuery = "";
   private readonly history: string[];
   private readonly opts: EditorOptions;
   private readonly resolve: (r: EditorResult) => void;
@@ -131,7 +295,8 @@ class Editor {
     this.history = opts.history ?? [];
     if (opts.pick) {
       this.mode = "pick";
-      this.menuItems = opts.pick;
+      this.pickItemsBase = opts.pick;
+      this.applyPickFilter();
     } else if (opts.secret) {
       this.mode = "secret";
     } else {
@@ -168,25 +333,12 @@ class Editor {
    */
   private collapseToInput(): void {
     if (!this.opts.keys.isTTY) return;
-    // Go from the current cursor row down to the region bottom, then erase the
-    // entire region back up to its top.
-    const down = this.lastRows - 1 - this.lastCursorRow;
-    if (down > 0) stdout.write(`\x1b[${down}B`);
-    stdout.write("\r");
-    if (this.lastRows > 1) stdout.write(`\x1b[${this.lastRows - 1}A`);
+    this.moveToRegionStart();
     stdout.write("\x1b[J");
-    // Reprint the plain submitted line (no frame).
-    if (this.mode === "secret") {
-      stdout.write(this.opts.prompt + "•".repeat((this.lines[0] ?? "").length));
-    } else if (this.mode === "pick") {
-      stdout.write(this.opts.prompt);
-    } else {
-      const plain = this.lines
-        .map((line, i) => (i === 0 ? this.opts.prompt : "  ") + line)
-        .join("\n");
-      stdout.write(plain);
-    }
-    this.lastRows = 0;
+    const view = this.buildCurrentView();
+    stdout.write(view.collapseRows.join("\n"));
+    this.lastRenderedRows = [];
+    this.lastView = null;
     this.lastCursorRow = 0;
   }
 
@@ -212,7 +364,7 @@ class Editor {
       return;
     }
 
-    if (this.mode === "pick") return this.onPickKey(key);
+    if (this.mode === "pick") return this.onPickKey(str, key);
 
     // A bracketed paste delivers its body as plain `str` with the pasting flag
     // set on the KeySource; newlines in it must be inserted as text, not submit.
@@ -362,7 +514,17 @@ class Editor {
   // --- enter / newline (B4) ---
 
   private onEnter(key: Key): void {
-    if (this.mode === "menu") return this.acceptMenu();
+    if (this.mode === "menu") {
+      const item = this.menuItems[this.menuSel];
+      if (this.menuKind === "command" && item && item.selectable !== false) {
+        this.lines = [item.value];
+        this.row = 0;
+        this.col = item.value.length;
+        this.closeMenu();
+        return this.finish({ kind: "submit", value: item.value });
+      }
+      return this.acceptMenu();
+    }
     // Alt+Enter or a trailing backslash inserts a newline instead of submitting.
     const line = this.lines[this.row] ?? "";
     if (key.meta || (this.col === line.length && line.endsWith("\\"))) {
@@ -403,7 +565,7 @@ class Editor {
 
   private onUp(): void {
     if (this.mode === "menu" || this.mode === "pick") {
-      this.menuSel = Math.max(0, this.menuSel - 1);
+      this.moveMenuSelection(-1);
       return this.draw();
     }
     if (this.row > 0) {
@@ -416,7 +578,7 @@ class Editor {
 
   private onDown(): void {
     if (this.mode === "menu" || this.mode === "pick") {
-      this.menuSel = Math.min(this.menuItems.length - 1, this.menuSel + 1);
+      this.moveMenuSelection(1);
       return this.draw();
     }
     if (this.row < this.lines.length - 1) {
@@ -467,7 +629,9 @@ class Editor {
       }
       case "l": // clear screen + redraw
         stdout.write("\x1b[2J\x1b[H");
-        this.lastRows = 0;
+        this.lastRenderedRows = [];
+        this.lastView = null;
+        this.lastCursorRow = 0;
         break;
       case "d": // EOF on empty buffer is handled by the façade; ignore here
         return;
@@ -497,7 +661,9 @@ class Editor {
           this.menuKind = "token";
           this.menuTokenStart = tok.start;
           this.menuItems = items;
-          this.menuSel = wasClosed ? 0 : Math.min(this.menuSel, items.length - 1);
+          this.menuSel = wasClosed
+            ? this.firstSelectableIndex(items)
+            : this.clampSelectableIndex(this.menuSel);
           return;
         }
       }
@@ -511,7 +677,9 @@ class Editor {
         this.mode = "menu";
         this.menuKind = "command";
         this.menuItems = items;
-        this.menuSel = wasClosed ? 0 : Math.min(this.menuSel, items.length - 1);
+        this.menuSel = wasClosed
+          ? this.firstSelectableIndex(items)
+          : this.clampSelectableIndex(this.menuSel);
         return;
       }
     }
@@ -549,7 +717,7 @@ class Editor {
    * cursor with the chosen path (#4). */
   private acceptMenu(): void {
     const item = this.menuItems[this.menuSel];
-    if (!item) return;
+    if (!item || item.selectable === false) return;
     if (this.menuKind === "token") {
       const line = this.lines[this.row] ?? "";
       const before = line.slice(0, this.menuTokenStart);
@@ -571,131 +739,169 @@ class Editor {
     this.draw();
   }
 
-  private onPickKey(key: Key): void {
-    if (key.name === "escape") return this.finish({ kind: "cancel" });
+  private onPickKey(str: string | undefined, key: Key): void {
+    if (key.name === "escape") {
+      if (this.pickQuery) {
+        this.pickQuery = "";
+        this.applyPickFilter();
+        return this.draw();
+      }
+      return this.finish({ kind: "cancel" });
+    }
     if (key.name === "return" || key.name === "enter") {
       const item = this.menuItems[this.menuSel];
-      return this.finish(item ? { kind: "submit", value: item.value } : { kind: "cancel" });
+      if (item && item.selectable !== false) {
+        return this.finish({ kind: "submit", value: item.value });
+      }
+      return this.draw();
     }
     if (key.name === "up") {
-      this.menuSel = Math.max(0, this.menuSel - 1);
+      this.moveMenuSelection(-1);
       return this.draw();
     }
     if (key.name === "down") {
-      this.menuSel = Math.min(this.menuItems.length - 1, this.menuSel + 1);
+      this.moveMenuSelection(1);
+      return this.draw();
+    }
+    if (key.name === "backspace") {
+      if (this.pickQuery) {
+        this.pickQuery = this.pickQuery.slice(0, -1);
+        this.applyPickFilter();
+        return this.draw();
+      }
+      return;
+    }
+    if (key.name === "delete") return;
+    if (str && !key.ctrl && !key.meta) {
+      this.pickQuery += str;
+      this.applyPickFilter();
       return this.draw();
     }
   }
 
   // --- rendering (anchored redraw) ---
 
-  /**
-   * Redraw the whole editable region, then place the cursor. The input lives
-   * inside a box frame (#8) whose border tints by mode (gray normal · yellow
-   * `!`-shell · cyan plan); the `/`-menu renders BELOW the frame. Pick/secret
-   * have no boxed text area, so they take a simpler unboxed path.
-   *
-   * Cursor bookkeeping: `lastCursorRow` is the row (from the region top) the
-   * cursor was parked on last time. We move up to the region top, erase
-   * downward, reprint, then move back down to the logical cursor row — now
-   * offset by +1 for the top border row.
-   */
   private draw(): void {
     if (!this.opts.keys.isTTY) return;
-    if (this.lastCursorRow > 0) stdout.write(`\x1b[${this.lastCursorRow}A`);
-    stdout.write("\r\x1b[J");
-
-    if (this.mode === "pick") return this.drawPick();
-
-    // Content lines that go INSIDE the box (prompt + buffer, or masked secret).
-    const contentLines: string[] =
-      this.mode === "secret"
-        ? [this.opts.prompt + "•".repeat((this.lines[0] ?? "").length)]
-        : this.lines.map((line, i) => (i === 0 ? this.opts.prompt : "  ") + line);
-
-    // Border tone: `!` shell (yellow) wins, else plan (cyan), else gray.
-    const tone = inputBorderTone(
-      this.lines[0] ?? "",
-      this.opts.planMode?.() ?? false,
-    );
-    const color = tone === "shell" ? yellow : tone === "plan" ? cyan : gray;
-
-    const cols = stdout.columns ?? 80;
-    const inner = frameInnerWidth(contentLines, cols);
-    const out: string[] = frameInput(contentLines, color, inner);
-
-    // Live `/` menu rows render below the frame.
-    if (this.mode === "menu") {
-      const view = renderMenu(
-        this.menuItems.map((m): MenuRow => ({ label: m.label, hint: m.hint })),
-        this.menuSel,
-        undefined,
-        cols,
-      );
-      for (const r of view.rows) out.push(r);
-    }
-
-    // Persistent footer (workdir + branch) as the bottom-left row (#10).
-    const footer = this.opts.footer?.() ?? "";
-    if (footer) out.push(footer);
-
-    stdout.write(out.join("\n"));
-    this.lastRows = out.length;
-
-    // Place the cursor. The content row is offset by +1 (top border); the
-    // column is offset by 2 for the "│ " left border + padding.
-    const cursorRow = this.mode === "secret" ? 0 : this.row;
-    const cursorRowInRegion = 1 + cursorRow;
-    const rowsUp = out.length - 1 - cursorRowInRegion;
-    if (rowsUp > 0) stdout.write(`\x1b[${rowsUp}A`);
-    stdout.write("\r");
-    const promptW = visibleWidth(this.opts.prompt);
-    const lead = cursorRow === 0 ? promptW : 2;
-    const colW =
-      this.mode === "secret"
-        ? (this.lines[0] ?? "").length
-        : visibleWidth((this.lines[cursorRow] ?? "").slice(0, this.col));
-    const targetCol = 2 + lead + colW;
-    if (targetCol > 0) stdout.write(`\x1b[${targetCol}C`);
-    this.lastCursorRow = cursorRowInRegion;
+    this.paintView(this.buildCurrentView());
   }
 
-  /** Unboxed redraw for pick mode: a prompt line plus the picker list. */
-  private drawPick(): void {
-    const out: string[] = [this.opts.prompt];
-    const view = renderMenu(
-      this.menuItems.map((m): MenuRow => ({ label: m.label, hint: m.hint })),
-      this.menuSel,
-      undefined,
-      stdout.columns ?? 80,
-    );
-    for (const r of view.rows) out.push(r);
-    stdout.write(out.join("\n"));
-    this.lastRows = out.length;
-    const rowsUp = out.length - 1;
-    if (rowsUp > 0) stdout.write(`\x1b[${rowsUp}A`);
-    stdout.write("\r");
-    const w = visibleWidth(this.opts.prompt);
-    if (w > 0) stdout.write(`\x1b[${w}C`);
-    this.lastCursorRow = 0;
-  }
-
-  /**
-   * Redraw the (empty) prompt with a transient hint line beneath it (#7). The
-   * next keystroke's draw() clears it, since draw() erases the whole region.
-   * Only meaningful in edit mode with an empty buffer, which is when it's used.
-   */
   private drawHint(hint: string): void {
     if (!this.opts.keys.isTTY) return;
-    if (this.lastCursorRow > 0) stdout.write(`\x1b[${this.lastCursorRow}A`);
-    stdout.write("\r\x1b[J");
-    const promptLine = this.opts.prompt + (this.lines[0] ?? "");
-    stdout.write(promptLine + "\n" + "  " + hint);
-    this.lastRows = 2;
-    // Park the cursor back on the input row, at the end of the prompt.
-    stdout.write("\x1b[1A\r");
-    const col = visibleWidth(promptLine);
-    if (col > 0) stdout.write(`\x1b[${col}C`);
-    this.lastCursorRow = 0;
+    this.paintView(buildHintView(this.opts.prompt, this.lines, hint));
   }
+
+  private buildCurrentView(): RenderView {
+    return buildRenderView({
+      prompt: this.opts.prompt,
+      lines: this.lines,
+      row: this.row,
+      col: this.col,
+      mode: this.mode,
+      cols: stdout.columns ?? 80,
+      menuItems: this.menuItems,
+      menuSel: this.menuSel,
+      footer: this.mode === "pick" || this.mode === "secret" ? "" : this.opts.footer?.() ?? "",
+      planMode: this.opts.planMode?.() ?? false,
+      pickQuery: this.pickQuery,
+    });
+  }
+
+  private moveToRegionStart(): void {
+    if (this.lastCursorRow > 0) stdout.write(`\x1b[${this.lastCursorRow}A`);
+    stdout.write("\r");
+  }
+
+  private paintView(view: RenderView): void {
+    if (!this.opts.keys.isTTY) return;
+    this.moveToRegionStart();
+
+    if (shouldFullRedraw(this.lastView, view)) {
+      stdout.write("\x1b[J");
+      stdout.write(view.rows.join("\n"));
+    } else {
+      const changed = new Set(changedRowIndices(this.lastRenderedRows, view.rows));
+      for (let i = 0; i < view.rows.length; i++) {
+        if (i > 0) stdout.write("\x1b[1B\r");
+        if (changed.has(i)) stdout.write("\x1b[2K" + (view.rows[i] ?? ""));
+      }
+    }
+
+    this.lastRenderedRows = [...view.rows];
+    this.lastView = view;
+    const rowsUp = view.rows.length - 1 - view.cursorRowInRegion;
+    if (rowsUp > 0) stdout.write(`\x1b[${rowsUp}A`);
+    stdout.write("\r");
+    if (view.targetCol > 0) stdout.write(`\x1b[${view.targetCol}C`);
+    this.lastCursorRow = view.cursorRowInRegion;
+  }
+
+  private firstSelectableIndex(items: EditorMenuItem[]): number {
+    const idx = items.findIndex((item) => item.selectable !== false);
+    return idx >= 0 ? idx : 0;
+  }
+
+  private clampSelectableIndex(idx: number): number {
+    if (this.menuItems.length === 0) return 0;
+    const clamped = Math.max(0, Math.min(this.menuItems.length - 1, idx));
+    if (this.menuItems[clamped]?.selectable !== false) return clamped;
+    this.menuSel = clamped;
+    this.moveMenuSelection(1);
+    return this.menuSel;
+  }
+
+  private moveMenuSelection(dir: number): void {
+    if (this.menuItems.length === 0) return;
+    let next = this.menuSel;
+    while (true) {
+      const candidate = next + dir;
+      if (candidate < 0 || candidate >= this.menuItems.length) return;
+      next = candidate;
+      if (this.menuItems[next]?.selectable !== false) {
+        this.menuSel = next;
+        return;
+      }
+    }
+  }
+
+  private applyPickFilter(): void {
+    const needle = this.pickQuery.trim();
+    if (!needle) {
+      this.menuItems = [...this.pickItemsBase];
+      this.menuSel = this.firstSelectableIndex(this.menuItems);
+      return;
+    }
+    this.menuItems = filterMenuRows(this.pickItemsBase, needle) as EditorMenuItem[];
+    this.menuSel = this.firstSelectableIndex(this.menuItems);
+  }
+}
+
+export function wrapTextRows(
+  text: string,
+  firstWidth: number,
+  restWidth: number,
+): string[] {
+  const first = Math.max(1, firstWidth);
+  const rest = Math.max(1, restWidth);
+  if (text === "") return [""];
+
+  const rows: string[] = [];
+  let current = "";
+  let currentWidth = 0;
+  let limit = first;
+
+  for (const ch of text) {
+    const width = visibleWidth(ch);
+    if (currentWidth > 0 && currentWidth + width > limit) {
+      rows.push(current);
+      current = "";
+      currentWidth = 0;
+      limit = rest;
+    }
+    current += ch;
+    currentWidth += width;
+  }
+
+  if (current !== "" || rows.length === 0) rows.push(current);
+  return rows;
 }

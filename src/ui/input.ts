@@ -2,6 +2,7 @@ import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline";
 import { KeySource } from "./keys.js";
 import { runEditor, type EditorMenuItem } from "./lineEditor.js";
+import { visibleWidth } from "./theme.js";
 
 /**
  * Interactive line input (docs/08, B1+B3+B4).
@@ -27,6 +28,35 @@ export interface MenuItem {
   label: string;
   value: string;
   hint?: string;
+  selectable?: boolean;
+  tone?: "green" | "dim";
+}
+
+export interface PromptPresentation {
+  prefixLines: string[];
+  prompt: string;
+}
+
+/** Split a long or multiline question into a preface plus a short inline prompt. */
+export function splitPromptPresentation(
+  prompt: string,
+  cols = stdout.columns ?? 80,
+): PromptPresentation {
+  const lines = prompt.split(/\r\n|\r|\n/);
+  if (lines.length > 1) {
+    return {
+      prefixLines: lines.map((line) => line.trimEnd()),
+      prompt: "> ",
+    };
+  }
+
+  const single = lines[0] ?? prompt;
+  const maxInline = Math.max(24, Math.floor(cols / 2));
+  if (visibleWidth(single) > maxInline) {
+    return { prefixLines: [single.trimEnd()], prompt: "> " };
+  }
+
+  return { prefixLines: [], prompt: single };
 }
 
 export interface LineReaderOptions {
@@ -65,11 +95,19 @@ export class LineReader {
    * `exitRequested` and resolves with "" so the REPL can quit. */
   async ask(prompt: string, seed?: string): Promise<string> {
     if (!this.isTTY) return this.askFallback(prompt);
+    const present = splitPromptPresentation(prompt, stdout.columns ?? 80);
+    for (const line of present.prefixLines) stdout.write(line + "\n");
     const menu = this.opts.menu
       ? (buf: string): EditorMenuItem[] | null => {
           const items = this.opts.menu!(buf);
           return items
-            ? items.map((m) => ({ label: m.label, value: m.value, hint: m.hint }))
+            ? items.map((m) => ({
+                label: m.label,
+                value: m.value,
+                hint: m.hint,
+                selectable: m.selectable,
+                tone: m.tone,
+              }))
             : null;
         }
       : undefined;
@@ -77,13 +115,19 @@ export class LineReader {
       ? (query: string): EditorMenuItem[] | null => {
           const items = this.opts.fileMenu!(query);
           return items
-            ? items.map((m) => ({ label: m.label, value: m.value, hint: m.hint }))
+            ? items.map((m) => ({
+                label: m.label,
+                value: m.value,
+                hint: m.hint,
+                selectable: m.selectable,
+                tone: m.tone,
+              }))
             : null;
         }
       : undefined;
     const result = await runEditor({
       keys: this.keys,
-      prompt,
+      prompt: present.prompt,
       history: this.history,
       ...(seed ? { seed } : {}),
       ...(menu ? { menu } : {}),
@@ -104,21 +148,37 @@ export class LineReader {
   /** Prompt for a secret (API key): masked, never recorded into history. */
   async askSecret(prompt: string): Promise<string> {
     if (!this.isTTY) return this.askFallback(prompt);
-    const result = await runEditor({ keys: this.keys, prompt, secret: true });
+    const present = splitPromptPresentation(prompt, stdout.columns ?? 80);
+    for (const line of present.prefixLines) stdout.write(line + "\n");
+    const result = await runEditor({
+      keys: this.keys,
+      prompt: present.prompt,
+      secret: true,
+    });
     return result.kind === "submit" ? result.value : "";
   }
 
   /**
    * Arrow-selectable picker. Resolves the chosen item's value, or null if the
-   * user cancels (Esc / Ctrl-C). Non-TTY: returns the first item's value.
+   * user cancels (Esc / Ctrl-C). Non-TTY: returns the first selectable value.
    */
   async pick(prompt: string, items: MenuItem[]): Promise<string | null> {
     if (items.length === 0) return null;
-    if (!this.isTTY) return items[0]!.value;
+    if (!this.isTTY) {
+      return items.find((item) => item.selectable !== false)?.value ?? null;
+    }
+    const present = splitPromptPresentation(prompt, stdout.columns ?? 80);
+    for (const line of present.prefixLines) stdout.write(line + "\n");
     const result = await runEditor({
       keys: this.keys,
-      prompt,
-      pick: items.map((m) => ({ label: m.label, value: m.value, hint: m.hint })),
+      prompt: present.prompt,
+      pick: items.map((m) => ({
+        label: m.label,
+        value: m.value,
+        hint: m.hint,
+        selectable: m.selectable,
+        tone: m.tone,
+      })),
     });
     return result.kind === "submit" ? result.value : null;
   }

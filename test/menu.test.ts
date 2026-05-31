@@ -51,9 +51,20 @@ describe("renderMenu", () => {
 
   it("adds a '· N more' footer when the list overflows the height", () => {
     const many = Array.from({ length: 12 }, (_, i) => ({ label: `/c${i}` }));
-    const { rows } = renderMenu(many, 0, 8);
-    const joined = rows.map(plain).join("\n");
-    expect(joined).toMatch(/more/);
+    const top = renderMenu(many, 0, 8).rows.map(plain).join("\n");
+    expect(top).toContain("↓ 4 more");
+    expect(top).not.toContain("↑");
+
+    const bottom = renderMenu(many, 11, 8).rows.map(plain).join("\n");
+    expect(bottom).toContain("↑ 4 earlier");
+    expect(bottom).not.toContain("↓ 0");
+  });
+
+  it("shows both directions when the selection is in the middle", () => {
+    const many = Array.from({ length: 20 }, (_, i) => ({ label: `/c${i}` }));
+    const joined = renderMenu(many, 10, 8).rows.map(plain).join("\n");
+    expect(joined).toContain("↑");
+    expect(joined).toContain("↓");
   });
 
   it("truncates rows so they do not wrap at the terminal edge", () => {
@@ -69,5 +80,23 @@ describe("renderMenu", () => {
       40,
     );
     expect(plain(rows[0]!).length).toBeLessThanOrEqual(40);
+  });
+
+  it("renders non-selectable group headings without the selection marker", () => {
+    const { rows } = renderMenu(
+      [
+        { label: "Profiles", selectable: false, tone: "dim" },
+        { label: "work", hint: "openai · gpt-4o", tone: "green" },
+        { label: "Actions", selectable: false, tone: "dim" },
+        { label: "New profile" },
+      ],
+      1,
+    );
+    const text = rows.map(plain);
+    expect(text[0]).toContain("Profiles");
+    expect(text[0]).not.toContain("›");
+    expect(text[2]).toContain("Actions");
+    expect(text[2]).not.toContain("›");
+    expect(text[1]).toContain("›");
   });
 });

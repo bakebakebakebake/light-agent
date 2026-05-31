@@ -1,4 +1,4 @@
-import { cyan, dim, gray, bold, visibleWidth } from "./theme.js";
+import { cyan, dim, gray, bold, green, visibleWidth } from "./theme.js";
 
 /**
  * Pure dropdown / picker row renderer (B1).
@@ -14,6 +14,8 @@ import { cyan, dim, gray, bold, visibleWidth } from "./theme.js";
 export interface MenuRow {
   label: string;
   hint?: string;
+  selectable?: boolean;
+  tone?: "green" | "dim";
 }
 
 export interface MenuView {
@@ -34,6 +36,69 @@ function truncatePlain(text: string, maxWidth: number): string {
     out = next;
   }
   return out + "…";
+}
+
+function normalize(text: string): string {
+  return text.toLowerCase().trim();
+}
+
+/** Lightweight fuzzy match: query chars must appear in order. */
+export function fuzzyScore(text: string, query: string): number | null {
+  const hay = normalize(text);
+  const needle = normalize(query);
+  if (!needle) return 0;
+  let score = 0;
+  let idx = -1;
+  let contiguous = 0;
+  for (const ch of needle) {
+    const found = hay.indexOf(ch, idx + 1);
+    if (found === -1) return null;
+    if (found === idx + 1) {
+      contiguous += 1;
+      score += 4 + contiguous;
+    } else {
+      contiguous = 0;
+      score += 1;
+    }
+    if (found === 0) score += 2;
+    idx = found;
+  }
+  return score;
+}
+
+export function matchesMenuRow(item: MenuRow, query: string): boolean {
+  const needle = normalize(query);
+  if (!needle) return true;
+  const haystacks = [item.label, item.hint ?? ""];
+  const terms = needle.split(/\s+/).filter(Boolean);
+  return terms.every((term) =>
+    haystacks.some((hay) => fuzzyScore(hay, term) !== null),
+  );
+}
+
+/** Filter menu rows while preserving group headings with matching children only. */
+export function filterMenuRows(items: MenuRow[], query: string): MenuRow[] {
+  const needle = normalize(query);
+  if (!needle) return items;
+
+  const out: MenuRow[] = [];
+  let pendingGroup: MenuRow | null = null;
+  let emittedGroup = false;
+
+  for (const item of items) {
+    if (item.selectable === false) {
+      pendingGroup = item;
+      emittedGroup = false;
+      continue;
+    }
+    if (!matchesMenuRow(item, needle)) continue;
+    if (pendingGroup && !emittedGroup) {
+      out.push(pendingGroup);
+      emittedGroup = true;
+    }
+    out.push(item);
+  }
+  return out;
 }
 
 /** Compute the scroll window [start, end) that keeps `selected` visible. */
@@ -64,8 +129,9 @@ export function renderMenu(
   const prefixWidth = 4; // "  " + marker + " "
   for (let i = start; i < end; i++) {
     const item = items[i]!;
-    const isSel = i === selected;
-    const marker = isSel ? cyan("›") : " ";
+    const selectable = item.selectable !== false;
+    const isSel = selectable && i === selected;
+    const marker = selectable ? (isSel ? cyan("›") : " ") : " ";
     const bodyWidth = Math.max(0, maxWidth - prefixWidth);
     let labelText = item.label;
     let hintText = item.hint ?? "";
@@ -76,13 +142,20 @@ export function renderMenu(
       const hintBudget = Math.max(0, bodyWidth - visibleWidth(labelText) - 2);
       hintText = truncatePlain(hintText, hintBudget);
     }
-    const label = isSel ? bold(cyan(labelText)) : labelText;
+    let label = labelText;
+    if (isSel) label = bold(cyan(labelText));
+    else if (item.tone === "green") label = green(labelText);
+    else if (!selectable || item.tone === "dim") label = dim(labelText);
     const hint = hintText ? "  " + dim(hintText) : "";
     rows.push(`  ${marker} ${label}${hint}`);
   }
-  const hidden = items.length - (end - start);
-  if (hidden > 0) {
-    rows.push(gray(truncatePlain(`    · ${hidden} more`, maxWidth)));
+  const hiddenAbove = start;
+  const hiddenBelow = Math.max(0, items.length - end);
+  const footerParts: string[] = [];
+  if (hiddenAbove > 0) footerParts.push(`↑ ${hiddenAbove} earlier`);
+  if (hiddenBelow > 0) footerParts.push(`↓ ${hiddenBelow} more`);
+  if (footerParts.length > 0) {
+    rows.push(gray(truncatePlain(`    ${footerParts.join("  ·  ")}`, maxWidth)));
   }
   return { rows };
 }

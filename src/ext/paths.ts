@@ -5,10 +5,10 @@ import { existsSync } from "node:fs";
 /**
  * Extension directory resolution (B2, docs/09).
  *
- * Skills and custom commands are discovered from `.agent` (or its `.agents`
- * alias) directories at two scopes:
- *   - user-level:    $HARNESS_HOME/.agent  (or ~/.agent)
- *   - workdir-level: <cwd>/.agent
+ * Skills and custom commands are discovered from `.agents` (preferred) or
+ * `.agent` directories at two scopes:
+ *   - user-level:    $HARNESS_HOME/.agents / ~/.agents
+ *   - workdir-level: <cwd>/.agents
  *
  * Workdir entries override user entries on a name clash, so a project can
  * specialize a globally-defined skill/command. Each scope has `skills/` and
@@ -28,7 +28,7 @@ function userBase(): string {
   return process.env.HARNESS_HOME ?? homedir();
 }
 
-/** All existing `.agent`/`.agents` dirs under `base` (both, if both exist). */
+/** All existing `.agents`/`.agent` dirs under `base` (both, if both exist). */
 function existingRoots(base: string): string[] {
   const found: string[] = [];
   for (const name of [".agent", ".agents"]) {
@@ -40,8 +40,9 @@ function existingRoots(base: string): string[] {
 
 /**
  * Resolve the active extension roots, user scope first then project scope.
- * Both `.agent` and `.agents` are scanned at each scope (a user may have either
- * or both). Callers that merge by name should let later (project) entries win.
+ * Both `.agents` and `.agent` are scanned at each scope (a user may have either
+ * or both). `.agents` is preferred when both exist at the same scope. Callers
+ * that merge by name should let later (project) entries win.
  */
 export function extRoots(cwd: string): ExtRoot[] {
   const roots: ExtRoot[] = [];

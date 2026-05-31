@@ -313,9 +313,10 @@ export function toOpenAIMessages(
         (b): b is Extract<ContentBlock, { type: "tool_use" }> =>
           b.type === "tool_use",
       );
+      if (text.length === 0 && toolUses.length === 0) continue;
       const msg: Extract<OpenAIMessage, { role: "assistant" }> = {
         role: "assistant",
-        content: text.length > 0 ? text : null,
+        content: text.length > 0 ? text : toolUses.length > 0 ? " " : null,
       };
       if (toolUses.length > 0) {
         msg.tool_calls = toolUses.map((b) => ({

@@ -76,13 +76,13 @@ describe("code fences", () => {
     expect(out).toContain("**not bold**");
   });
 
-  it("frames fenced code with a labeled header but no per-line gutter", () => {
+  it("renders fenced code with only a lightweight language label", () => {
     const md = ["```ts", "let n = 1;", "```"].join("\n");
     const out = renderMarkdown(md);
-    expect(out).toContain("┌"); // header rule
-    expect(out).toContain("└"); // footer rule
-    expect(out).toContain("ts"); // language label in the header
+    expect(out).toContain("ts");
     expect(out).toContain("let n = 1;"); // code survives
+    expect(out).not.toContain("┌");
+    expect(out).not.toContain("└");
     // Copy-friendliness (#2): the code line must NOT carry a leading "│ "
     // gutter, so selecting it yields clean source.
     const lines = out.split("\n");

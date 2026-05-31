@@ -69,6 +69,25 @@ describe("loadSkills", () => {
     expect(skills.get("tldr")!.body).toBe("Summarize in one line.");
   });
 
+  it("prefers .agents over .agent when both define the same skill", () => {
+    const root = scratch();
+    const legacy = join(root, ".agent", "skills", "shared");
+    const modern = join(root, ".agents", "skills", "shared");
+    mkdirSync(legacy, { recursive: true });
+    mkdirSync(modern, { recursive: true });
+    writeFileSync(
+      join(legacy, "SKILL.md"),
+      "---\nname: shared\ndescription: legacy\n---\nlegacy body",
+    );
+    writeFileSync(
+      join(modern, "SKILL.md"),
+      "---\nname: shared\ndescription: modern\n---\nmodern body",
+    );
+    const skills = loadSkills(root);
+    expect(skills.get("shared")?.description).toBe("modern");
+    expect(skills.get("shared")?.body).toBe("modern body");
+  });
+
   it("returns an empty map when there is no .agent dir", () => {
     const root = scratch();
     expect(loadSkills(root).size).toBe(0);
@@ -105,4 +124,3 @@ describe("loadCustomCommandDefs + buildCustomCommands", () => {
     expect(state.queuedInput).toBe("Draft a PR for the login flow.");
   });
 });
-

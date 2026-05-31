@@ -59,7 +59,7 @@ describe("toOpenAIMessages", () => {
     });
   });
 
-  it("uses null content for an assistant turn that is only tool calls", () => {
+  it("uses a single space for an assistant turn that is only tool calls", () => {
     const msgs: Message[] = [
       {
         role: "assistant",
@@ -68,7 +68,16 @@ describe("toOpenAIMessages", () => {
     ];
     const out = toOpenAIMessages("", msgs);
     const asst = out[0] as { content: string | null };
-    expect(asst.content).toBeNull();
+    expect(asst.content).toBe(" ");
+  });
+
+  it("drops truly empty assistant and user messages", () => {
+    const msgs: Message[] = [
+      { role: "assistant", content: [] },
+      { role: "user", content: [] },
+      { role: "user", content: [{ type: "text", text: "hi" }] },
+    ];
+    expect(toOpenAIMessages("", msgs)).toEqual([{ role: "user", content: "hi" }]);
   });
 });
 

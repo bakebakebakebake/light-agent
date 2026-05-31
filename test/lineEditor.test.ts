@@ -1,5 +1,10 @@
-import { describe, it, expect, vi } from "vitest";
-import { runEditor, type EditorResult } from "../src/ui/lineEditor.js";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import {
+  buildRenderView,
+  runEditor,
+  shouldFullRedraw,
+  type EditorResult,
+} from "../src/ui/lineEditor.js";
 import type { Key, KeyHandler } from "../src/ui/keys.js";
 
 /**
@@ -42,9 +47,20 @@ class FakeKeys {
   }
 }
 
+class TtyKeys extends FakeKeys {
+  override isTTY = true;
+}
+
 function run(keys: FakeKeys, extra: Record<string, unknown> = {}): Promise<EditorResult> {
   return runEditor({ keys: keys as never, prompt: "> ", ...extra });
 }
+
+let writeSpy = vi.spyOn(process.stdout, "write");
+
+afterEach(() => {
+  writeSpy.mockReset();
+  writeSpy.mockImplementation(() => true);
+});
 
 describe("lineEditor double Ctrl-C exit (#7)", () => {
   it("exits when Ctrl-C is pressed twice on an empty prompt", async () => {
@@ -156,5 +172,165 @@ describe("lineEditor double Esc rewind", () => {
     keys.raw(undefined, {});
     keys.send("escape");
     expect(await p).toEqual({ kind: "submit", value: "/rewind" });
+  });
+});
+
+describe("lineEditor grouped pickers", () => {
+  it("starts on the first selectable row and skips group headings", async () => {
+    const keys = new FakeKeys();
+    const p = run(keys, {
+      pick: [
+        { label: "Profiles", value: "__profiles__", selectable: false, tone: "dim" },
+        { label: "work", value: "use:work", tone: "green" },
+        { label: "Actions", value: "__actions__", selectable: false, tone: "dim" },
+        { label: "New profile", value: "new" },
+      ],
+    });
+    keys.send("down");
+    keys.send("return");
+    expect(await p).toEqual({ kind: "submit", value: "new" });
+  });
+
+  it("filters picker items as you type and submits the filtered match", async () => {
+    const keys = new FakeKeys();
+    const p = run(keys, {
+      pick: [
+        { label: "Profiles", value: "__profiles__", selectable: false, tone: "dim" },
+        { label: "deepseek-official", value: "use:deepseek" },
+        { label: "packycode-aws-q", value: "use:packy", hint: "openai · qwen" },
+      ],
+    });
+    keys.type("aws");
+    keys.send("return");
+    expect(await p).toEqual({ kind: "submit", value: "use:packy" });
+  });
+});
+
+describe("lineEditor slash menu enter", () => {
+  it("submits the selected slash command directly on Enter", async () => {
+    const keys = new FakeKeys();
+    const p = run(keys, {
+      menu: (buffer: string) =>
+        buffer.startsWith("/pro")
+          ? [
+              { label: "/profile", value: "/profile", hint: "manage profiles" },
+              { label: "/prompt", value: "/prompt", hint: "something else" },
+            ]
+          : null,
+    });
+    keys.type("/pro");
+    keys.send("return");
+    expect(await p).toEqual({ kind: "submit", value: "/profile" });
+  });
+});
+
+describe("lineEditor render views", () => {
+  it("builds a frame view with menu rows and footer rows", () => {
+    const view = buildRenderView({
+      prompt: "> ",
+      lines: ["/pro"],
+      row: 0,
+      col: 4,
+      mode: "menu",
+      cols: 80,
+      menuItems: [
+        { label: "Profiles", value: "__profiles__", selectable: false, tone: "dim" },
+        { label: "/profile", value: "/profile", hint: "manage profiles", tone: "green" },
+        { label: "/prompt", value: "/prompt", hint: "change the prompt" },
+      ],
+      menuSel: 1,
+      footer: "workdir / main",
+    });
+    expect(view.kind).toBe("frame");
+    expect(view.rows.join("\n")).toContain("Profiles");
+    expect(view.rows.join("\n")).toContain("workdir / main");
+    expect(view.cursorRowInRegion).toBeGreaterThan(0);
+    expect(view.targetCol).toBeGreaterThan(0);
+  });
+
+  it("builds a picker view with an inline query and no footer", () => {
+    const view = buildRenderView({
+      prompt: "Choose",
+      lines: [""],
+      row: 0,
+      col: 0,
+      mode: "pick",
+      cols: 80,
+      menuItems: [{ label: "alpha", value: "a" }],
+      pickQuery: "alp",
+    });
+    expect(view.kind).toBe("pick");
+    expect(view.rows[0]).toContain("[alp]");
+    expect(view.rows.join("\n")).not.toContain("workdir");
+  });
+
+  it("treats menu/footer changes as structural redraws but cursor moves as partial updates", () => {
+    const frame = buildRenderView({
+      prompt: "> ",
+      lines: ["hello"],
+      row: 0,
+      col: 1,
+      mode: "edit",
+      cols: 80,
+      footer: "workdir / main",
+    });
+    const movedCursor = buildRenderView({
+      prompt: "> ",
+      lines: ["hello"],
+      row: 0,
+      col: 2,
+      mode: "edit",
+      cols: 80,
+      footer: "workdir / main",
+    });
+    const withMenu = buildRenderView({
+      prompt: "> ",
+      lines: ["hello"],
+      row: 0,
+      col: 2,
+      mode: "menu",
+      cols: 80,
+      menuItems: [{ label: "/profile", value: "/profile" }],
+      menuSel: 0,
+      footer: "workdir / main",
+    });
+    expect(shouldFullRedraw(frame, movedCursor)).toBe(false);
+    expect(shouldFullRedraw(frame, withMenu)).toBe(true);
+  });
+});
+
+describe("lineEditor TTY redraws", () => {
+  it("full redraws on menu open but not on menu navigation", async () => {
+    const chunks: string[] = [];
+    writeSpy.mockImplementation(((chunk: string | Uint8Array) => {
+      chunks.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write);
+
+    const keys = new TtyKeys();
+    const p = run(keys, {
+      menu: (buffer: string) =>
+        buffer.startsWith("/")
+          ? [
+              { label: "Profiles", value: "__profiles__", selectable: false, tone: "dim" },
+              { label: "/profile", value: "/profile", hint: "manage profiles" },
+              { label: "/prompt", value: "/prompt", hint: "change the prompt" },
+            ]
+          : null,
+    });
+
+    chunks.length = 0;
+    keys.type("/");
+    expect(chunks.join("")).toContain("\x1b[J");
+
+    chunks.length = 0;
+    keys.send("down");
+    expect(chunks.join("")).not.toContain("\x1b[J");
+
+    chunks.length = 0;
+    keys.send("return");
+    const submit = chunks.join("");
+    expect(submit).toContain("> /prompt");
+    expect(await p).toEqual({ kind: "submit", value: "/prompt" });
   });
 });
