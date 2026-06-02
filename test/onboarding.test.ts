@@ -16,6 +16,10 @@ afterEach(() => {
     if (!(k in SAVED)) delete process.env[k];
   }
   Object.assign(process.env, SAVED);
+  delete process.env.LIGHT_AGENT_PROVIDER;
+  delete process.env.LIGHT_AGENT_MODEL;
+  delete process.env.LIGHT_AGENT_PROFILE;
+  delete process.env.LIGHT_AGENT_HOME;
   delete process.env.HARNESS_PROVIDER;
   delete process.env.HARNESS_MODEL;
   delete process.env.HARNESS_PROFILE;
@@ -27,10 +31,10 @@ afterEach(() => {
 });
 
 /** Point the profile store at a fresh empty temp dir so the real one (under
- * ~/.harness-agent) never interferes with env-fallback assertions. */
+ * ~/.light-agent) never interferes with env-fallback assertions. */
 function isolatedStore(): string {
   const home = mkdtempSync(join(tmpdir(), "hh-"));
-  process.env.HARNESS_HOME = home;
+  process.env.LIGHT_AGENT_HOME = home;
   return home;
 }
 
@@ -46,7 +50,7 @@ describe("isConfigured", () => {
   it("returns false with no store and no env creds", () => {
     isolatedStore();
     const dir = mkdtempSync(join(tmpdir(), "onb-"));
-    delete process.env.HARNESS_PROVIDER;
+    delete process.env.LIGHT_AGENT_PROVIDER;
     delete process.env.ANTHROPIC_API_KEY;
     expect(isConfigured(dir)).toBe(false);
     rmSync(dir, { recursive: true, force: true });
@@ -66,11 +70,11 @@ describe("isConfigured", () => {
     const dir = mkdtempSync(join(tmpdir(), "onb-"));
     writeFileSync(
       join(dir, ".env"),
-      "HARNESS_PROVIDER=openai\nOPENAI_API_KEY=sk-x\n",
+      "LIGHT_AGENT_PROVIDER=openai\nOPENAI_API_KEY=sk-x\n",
     );
-    delete process.env.HARNESS_PROVIDER;
+    delete process.env.LIGHT_AGENT_PROVIDER;
     delete process.env.OPENAI_API_KEY;
-    delete process.env.HARNESS_MODEL;
+    delete process.env.LIGHT_AGENT_MODEL;
     expect(isConfigured(dir)).toBe(false);
     rmSync(dir, { recursive: true, force: true });
   });
@@ -94,11 +98,11 @@ describe("writeEnvEntries", () => {
     const dir = mkdtempSync(join(tmpdir(), "onb-"));
     const path = writeEnvEntries(dir, {
       ANTHROPIC_API_KEY: "sk-ant-x",
-      HARNESS_MODEL: "claude-sonnet-4-5-20250929",
+      LIGHT_AGENT_MODEL: "claude-sonnet-4-5-20250929",
     });
     const body = readFileSync(path, "utf8");
     expect(body).toContain("ANTHROPIC_API_KEY=sk-ant-x");
-    expect(body).toContain("HARNESS_MODEL=claude-sonnet-4-5-20250929");
+    expect(body).toContain("LIGHT_AGENT_MODEL=claude-sonnet-4-5-20250929");
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -127,7 +131,7 @@ describe("collectOnboarding", () => {
     );
     expect(result.provider).toBe("anthropic");
     expect(result.entries.ANTHROPIC_API_KEY).toBe("sk-ant-test");
-    expect(result.entries.HARNESS_MODEL).toContain("claude");
+    expect(result.entries.LIGHT_AGENT_MODEL).toContain("claude");
     expect(result.entries.ANTHROPIC_BASE_URL).toBeUndefined();
   });
 
@@ -153,7 +157,7 @@ describe("collectOnboarding", () => {
     expect(result.provider).toBe("openai");
     expect(result.entries.OPENAI_API_KEY).toBe("sk-test");
     expect(result.entries.OPENAI_BASE_URL).toBe("https://api.deepseek.com/v1");
-    expect(result.entries.HARNESS_MODEL).toBe("deepseek-chat");
+    expect(result.entries.LIGHT_AGENT_MODEL).toBe("deepseek-chat");
   });
 
   it("re-prompts until a model is given for openai", async () => {
@@ -162,7 +166,7 @@ describe("collectOnboarding", () => {
       scriptedAsk(["2", "sk-test", "", "", "", "moonshot-v1-8k"]),
       noModels,
     );
-    expect(result.entries.HARNESS_MODEL).toBe("moonshot-v1-8k");
+    expect(result.entries.LIGHT_AGENT_MODEL).toBe("moonshot-v1-8k");
   });
 });
 
@@ -175,7 +179,7 @@ describe("collectOnboarding model fetching (#9)", () => {
       fetch,
     );
     expect(result.model).toBe("model-two");
-    expect(result.entries.HARNESS_MODEL).toBe("model-two");
+    expect(result.entries.LIGHT_AGENT_MODEL).toBe("model-two");
   });
 
   it("accepts a typed model name even when a list is offered", async () => {

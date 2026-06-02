@@ -13,7 +13,7 @@ export function systemPrompt(
   skillCatalog: readonly string[] = [],
 ): string {
   return [
-    "You are Harness-Agent, a command-line coding assistant operating inside a",
+    "You are Light-Agent, a command-line coding assistant operating inside a",
     `single working directory: ${workdir}.`,
     "",
     "You work by calling tools. Available tools:",

@@ -27,7 +27,7 @@ import { loadSkills, formatSkillCatalog } from "./ext/skills.js";
 import { type Skill, skillContextBlock } from "./ext/skills.js";
 import { loadRepoAgentConfig } from "./ext/repoConfig.js";
 import { searchFiles } from "./ext/fileSearch.js";
-import { runShell } from "./util/shell.js";
+import { runForegroundShell } from "./util/shell.js";
 import { gitBranchCached } from "./util/git.js";
 import { cloneTodos, type TodoItem } from "./todos.js";
 import { ToolRegistry } from "./tools/registry.js";
@@ -50,6 +50,20 @@ function attachSkillToState(state: SessionState, skill: Skill): void {
   if (!state.pendingContextLabels.includes(skill.name)) {
     state.pendingContextLabels.push(skill.name);
   }
+}
+
+function detachLastSkillFromState(state: SessionState): boolean {
+  const last = state.pendingContextLabels[state.pendingContextLabels.length - 1];
+  if (!last) return false;
+  state.pendingContextLabels = state.pendingContextLabels.slice(0, -1);
+  const prefix = `# skill: ${last.toLowerCase()}\n`;
+  for (let i = state.pendingContext.length - 1; i >= 0; i -= 1) {
+    if (state.pendingContext[i]?.toLowerCase().startsWith(prefix)) {
+      state.pendingContext.splice(i, 1);
+      break;
+    }
+  }
+  return true;
 }
 
 /**
@@ -116,6 +130,7 @@ async function main(): Promise<void> {
       if (!skill) return;
       attachSkillToState(state, skill);
     },
+    detachLastSkill: () => detachLastSkillFromState(state),
     // Tint the input frame cyan in plan mode (#8). `state` is initialized below
     // and this runs lazily on each draw, so it always sees the live mode.
     planMode: () => state.mode === "plan",
@@ -147,7 +162,7 @@ async function main(): Promise<void> {
     stdout.write(mascot() + "\n");
     stdout.write(
       "  " +
-        bold("Welcome to Harness-Agent.") +
+        bold("Welcome to Light-Agent.") +
         dim(" No credentials found — let's set one up.\n") +
         dim(`  (Saved to ${storePath()}, locked to your user.)\n\n`),
     );
@@ -418,7 +433,7 @@ async function main(): Promise<void> {
         stdout.write(dim("  (empty shell command)\n\n"));
         continue;
       }
-      await runShellCommand(cmd, state.config.workdir);
+      await runShellCommand(reader, cmd, state.config.workdir);
       stdout.write("\n");
       continue;
     }
@@ -600,25 +615,33 @@ async function maybeAutoCompact(
 
 /**
  * Run a user-typed `!` shell command (#5): execute the raw line through the
- * shell in the workdir, streaming a header then the captured output. The human
- * typed it, so it gets full shell features and is NOT gated like the model's
- * bash tool. Output is echoed only — it never enters the model's history.
+ * shell in the workdir, handing the real foreground TTY to the child process.
+ * The human typed it, so it gets full shell features and is NOT gated like the
+ * model's bash tool. Output goes straight to the terminal and never enters the
+ * model's history.
  */
-async function runShellCommand(cmd: string, workdir: string): Promise<void> {
+async function runShellCommand(
+  reader: LineReader,
+  cmd: string,
+  workdir: string,
+): Promise<void> {
   stdout.write(dim(`  ${symbols.dot} $ ${cmd}\n`));
-  const r = await runShell(cmd, {
-    cwd: workdir,
-    timeoutMs: 120_000,
-    shellPath: process.env.SHELL,
-    loginShell: true,
-    interactiveShell: true,
-  });
+  const r = await reader.withTerminalReleased(() =>
+    runForegroundShell(cmd, {
+      cwd: workdir,
+      timeoutMs: 120_000,
+      shellPath: process.env.SHELL,
+      // Foreground `!` commands avoid a real interactive shell because job
+      // control can suspend inherited TTY sessions. The wrapper still sources
+      // the user's rc files for aliases like `ll`.
+      loginShell: false,
+      interactiveShell: true,
+    }),
+  );
   if (r.error) {
     stdout.write(`  ${cmd}: ${r.error}\n`);
     return;
   }
-  if (r.stdout) stdout.write(indent(r.stdout.trimEnd()) + "\n");
-  if (r.stderr) stdout.write(indent(r.stderr.trimEnd()) + "\n");
   if (r.timedOut) {
     stdout.write(dim("  (timed out after 120s and was killed)\n"));
   } else if ((r.exitCode ?? 0) !== 0) {

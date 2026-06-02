@@ -30,6 +30,7 @@
   - 不会自动发送
   - 输入框里会显示 `skills: ...`
   - 你可以继续写正文
+- `#` 内联选择和 `/skill` 选择现在走同一条挂载链路,所以 badge 会立刻刷新。
 - 这批 skill 只作用于**下一条消息**。发出去后会自动消费掉。
 
 `/skill` 也仍然可用:
@@ -37,11 +38,16 @@
 ```text
 /skill
 /skill review
+/skill remove review
 /skill list
 /skill disable review
 /skill enable review
 /skill clear
 ```
+
+- `/skill` picker 现在也会显示当前已挂载的 skill:
+  - 直接选某个已挂载 skill,就是把它从下一条消息里移除
+  - 也可以选 `Clear all attached skills`
 
 当前 skill 会显示这些元数据:
 
@@ -52,7 +58,7 @@
 repo 级控制文件:
 
 ```text
-<workdir>/.agents/harness-agent.json
+<workdir>/.agents/light-agent.json
 ```
 
 其中 `disabledSkills` 会让对应 skill:
@@ -77,8 +83,9 @@ repo 级控制文件:
 
 - `/diff`
   - 先列出 changed files
-  - 在 TTY 模式下继续选文件看 patch
-  - 看完一个 patch 后,还可以继续选别的文件
+  - 在 TTY 模式下会先显示一个 diff overview
+  - 再选文件看 patch
+  - 看完一个 patch 后,可以直接选择回到文件列表或退出 `/diff`
 - `/diff --staged`
   - 只看 staged changes
 - `/diff --unstaged`
@@ -93,7 +100,7 @@ repo 级控制文件:
 ## 4. `/search`
 
 ```text
-/search harness-agent github
+/search light-agent github
 /search openai responses api tools
 /search latest anthropic release notes
 ```
@@ -105,6 +112,14 @@ repo 级控制文件:
 3. 本地再做一轮重排
 4. 输出标题、来源、backend、URL、摘要、日期
 5. 在 TTY 模式下可以继续选一个结果,直接抓页面正文
+
+补充一点:
+
+- DeepSeek V4 走官方 thinking 语义时,CLI 的 `thinking high` 会映射到
+  DeepSeek 的最高档 `reasoning_effort=max`
+- `thinking low/medium` 会映射到 DeepSeek 的 `high`
+- 某些第三方 OpenAI 兼容网关如果不接受这些字段,会自动回退到不带
+  DeepSeek thinking 扩展字段的请求,避免直接 400
 
 排序倾向:
 
@@ -146,6 +161,11 @@ repo 级控制文件:
 
 你自己手打的 `!` 命令不受它影响。
 
+另外,`!` 现在会临时释放 raw stdin,把真实前台 TTY 交给子进程,并改成
+前台非 interactive shell + 显式加载 rc 文件的方式执行,所以
+`npm run dev` 这类长期运行命令更不容易再出现 `suspended (tty input)`
+或 `suspended (tty output)`。
+
 ## 6. `/debug` 与日志
 
 ```text
@@ -156,7 +176,7 @@ repo 级控制文件:
 - 打开后会把结构化日志写到:
 
 ```text
-~/.harness-agent/logs/harness-agent.log
+~/.light-agent/logs/light-agent.log
 ```
 
 - 当前重点记录:

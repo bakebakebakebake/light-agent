@@ -82,6 +82,18 @@ export function summarizeDiffFile(file: GitDiffFile): string {
   return `${statusLabel(file)}  ${path}  ${dim(`(${stats})`)}`;
 }
 
+export function diffTotals(
+  files: readonly GitDiffFile[],
+): { additions: number; deletions: number } {
+  return files.reduce(
+    (totals, file) => ({
+      additions: totals.additions + file.additions,
+      deletions: totals.deletions + file.deletions,
+    }),
+    { additions: 0, deletions: 0 },
+  );
+}
+
 export function renderDiffFileList(
   title: string,
   files: readonly GitDiffFile[],
@@ -90,6 +102,44 @@ export function renderDiffFileList(
   return [
     bold(`  ${title}`),
     ...files.map((file) => `  ${summarizeDiffFile(file)}`),
+  ];
+}
+
+export function renderDiffOverview(
+  staged: readonly GitDiffFile[],
+  unstaged: readonly GitDiffFile[],
+): string[] {
+  const stagedTotals = diffTotals(staged);
+  const unstagedTotals = diffTotals(unstaged);
+  const totalFiles = staged.length + unstaged.length;
+  return [
+    bold("  Diff browser"),
+    dim(
+      `  ${totalFiles} file(s) ${cyan("staged " + staged.length)} ${yellow("unstaged " + unstaged.length)} ` +
+      `${symbolsLine(stagedTotals.additions, unstagedTotals.additions, stagedTotals.deletions, unstagedTotals.deletions)}`,
+    ),
+  ];
+}
+
+function symbolsLine(
+  stagedAdditions: number,
+  unstagedAdditions: number,
+  stagedDeletions: number,
+  unstagedDeletions: number,
+): string {
+  return `${green("+" + (stagedAdditions + unstagedAdditions))} ${red("-" + (stagedDeletions + unstagedDeletions))}`;
+}
+
+export function renderDiffPatchHeader(
+  file: GitDiffFile,
+  staged: boolean,
+): string[] {
+  return [
+    bold(`  ${staged ? "Staged" : "Unstaged"} patch`),
+    `  ${cyan(file.path)}`,
+    `  ${dim(
+      `${file.status} ${file.previousPath ? `· from ${file.previousPath} ` : ""}· +${file.additions} -${file.deletions}`,
+    )}`,
   ];
 }
 

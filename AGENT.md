@@ -1,4 +1,4 @@
-# AGENT.md — Harness-Agent 项目交接文档
+# AGENT.md — Light-Agent 项目交接文档
 
 > 本文件用于**跨会话交接**:把项目背景、架构、进度、规划与开发约定集中记录,
 > 确保换会话后不丢失上下文。最后更新:2026-06-02。
@@ -7,10 +7,10 @@
 
 ## 1. 项目概览
 
-- **名称**:`harness-agent`(`package.json` version `0.4.0`,已公开发布到 npm)。
+- **名称**:`Light-Agent`(npm package:`light-agent-cli`, CLI command:`light-agent`)。
 - **定位**:一个**本地优先的命令行编码 Agent**(Claude Code 式),在本仓库的
   `docs/` 架构参考基础上逐步实现。
-- **入口**:`src/cli.ts`(交互式 REPL);构建后 `bin: harness-agent → dist/cli.js`。
+- **入口**:`src/cli.ts`(交互式 REPL);构建后 `bin: light-agent → dist/cli.js`。
 - **运行形态**:终端 TUI——流式渲染、工具调用、权限确认、会话存档/恢复、
   斜杠命令、`@` 文件补全、`#` skill 内联挂载、`!` shell 直通、原生记忆系统、
   plan/allowAll 等权限模式。
@@ -19,7 +19,7 @@
 ### 当前健康状态(交接时)
 - ✅ **391 个测试全部通过**,跨 **44 个测试文件**(`npm test`)。
 - ✅ **`tsc --noEmit` 类型检查干净**(`npm run typecheck`)。
-- ✅ **npm 包已发布**,可以直接 `npm install -g harness-agent` 或 `npx harness-agent`。
+- ✅ **npm 包可发布为** `light-agent-cli`,命令名为 `light-agent`。
 - ✅ **GitHub Actions CI 已接入**:`.github/workflows/ci.yml` 会在 push / PR / tag 上跑
   `typecheck`、`test`、`build`。
 
@@ -51,8 +51,8 @@ npm run test:watch     # vitest 监视模式
 cli.ts                 # 交互式 REPL 主入口:读行→命令/shell/turn→渲染
 config.ts              # Config 解析:.env 加载、provider 选择、thinking/ctx 覆盖
 onboarding.ts          # 首次运行向导(无凭证时引导配置,保存为 profile)
-profiles.ts            # 全局 profile 存储(~/.harness-agent/config.json)
-sessions.ts            # 会话存档/恢复(~/.harness-agent/sessions/<id>.json)
+profiles.ts            # 全局 profile 存储(~/.light-agent/config.json)
+sessions.ts            # 会话存档/恢复(~/.light-agent/sessions/<id>.json)
 prompt.ts              # system prompt 组装
 memory/                # 原生记忆系统
   types.ts             #   MemoryCard / RawTurn / MemoryContextPacket
@@ -134,16 +134,17 @@ util/                  # git.ts(分支/缓存/diff)、shell.ts、web.ts、logger
 ## 4. 配置与存储
 
 ### 凭证 / Provider(`.env`,见 `.env.example`)
-- `HARNESS_PROVIDER=anthropic`(默认)或 `openai`。
+- `LIGHT_AGENT_PROVIDER=anthropic`(默认)或 `openai`。
 - **anthropic**:`ANTHROPIC_API_KEY` 必填;`ANTHROPIC_BASE_URL` 可指向中转/代理;
   默认模型 `claude-sonnet-4-5-20250929`。
-- **openai 兼容**:`OPENAI_API_KEY` + `OPENAI_BASE_URL` + `HARNESS_MODEL`(必填,
+- **openai 兼容**:`OPENAI_API_KEY` + `OPENAI_BASE_URL` + `LIGHT_AGENT_MODEL`(必填,
   因为跨服务无合理默认)。支持 OpenRouter/DeepSeek/Kimi/Qwen/Zhipu/本地 Ollama/vLLM。
-- 其它可选 env:`HARNESS_MODEL`、`HARNESS_THINKING`(off/low/medium/high)、
-  `HARNESS_CONTEXT_WINDOW`(如 `128k`,#11 覆盖内置窗口表)、`HARNESS_PROFILE`
-  (单次切换 profile)、`HARNESS_HOME`(覆盖存储根目录)。
+- 其它可选 env:`LIGHT_AGENT_MODEL`、`LIGHT_AGENT_THINKING`(off/low/medium/high)、
+  `LIGHT_AGENT_CONTEXT_WINDOW`(如 `128k`,#11 覆盖内置窗口表)、`LIGHT_AGENT_PROFILE`
+  (单次切换 profile)、`LIGHT_AGENT_HOME`(覆盖存储根目录)。
+  兼容保留旧的 `HARNESS_*` 变量作为 fallback。
 
-### 持久化位置(默认 `~/.harness-agent/`,可被 `HARNESS_HOME` 覆盖)
+### 持久化位置(默认 `~/.light-agent/`,可被 `LIGHT_AGENT_HOME` 覆盖)
 - `config.json` — 全局多 profile 存储(`/profile`、`/profiles` 命令管理)。
 - `sessions/<id>.json` — 每个会话一份存档(`/resume`、`/rewind` 用)。
 - `memory/user/*.md` — 用户级长期记忆卡。
@@ -180,9 +181,14 @@ util/                  # git.ts(分支/缓存/diff)、shell.ts、web.ts、logger
   内联挂载、`!` shell 直通。
 - 多行输入(Alt-Enter 或行尾 `\`)、历史(↑↓)、Ctrl-A/E/K/U/W/L 等行编辑。
 - `/skill` 支持 picker、`list`、`enable`、`disable`、`clear`;已选 skill 会以
-  `skills:` 标记显示在输入框中,只作用于下一条消息。
-- `/diff` 先列 changed files,再 drill-down 到单文件 patch,看完一个 patch 后可继续选别的文件。
+  `skills:` 标记显示在输入框中,只作用于下一条消息。`#` 内联挂载与 `/skill`
+  共享同一条挂载路径,会在当前输入轮次里立刻刷新 badge。`/skill` picker 也能
+  直接移除单个已挂载 skill 或一键清空。
+- `/diff` 先列 changed files,再 drill-down 到单文件 patch;当前会先显示 overview,
+  看完 patch 后可直接回到文件列表或退出。
 - `/search` 走 Tavily 优先 / Bing 降级,会返回来源、backend、URL、摘要,并可继续抓取正文。
+- DeepSeek V4 的 thinking 现已接入官方 `thinking` + `reasoning_effort` 语义;
+  当前 CLI 的 `high` 会映射到 DeepSeek 的最高档 `max`,并在不兼容网关上自动回退。
 - `/mcp` 会显示 configured / connected / loaded-tool 状态。
 - `/protect` 可维护 repo 级 blocked commands 与 protected paths,只拦模型动作。
 - 流式渲染 + markdown + 工具调用行 + spinner;确认流带 diff 预览。
@@ -212,7 +218,7 @@ util/                  # git.ts(分支/缓存/diff)、shell.ts、web.ts、logger
 - `commands.ts` — 加载自定义斜杠命令(模板),`/reload` 热重载。
 - `fileSearch.ts` — `@` 菜单的 workdir 文件排序搜索(exact>prefix>substring>
   subsequence,跳过 `node_modules`)。
-- `paths.ts` — 扩展根目录解析(项目级 + `~/.harness-agent`),并兼容 `.agents`
+- `paths.ts` — 扩展根目录解析(项目级 + `~/.light-agent`),并兼容 `.agents`
   与 `.agent` 两种目录。
 
 ---
@@ -258,7 +264,7 @@ util/                  # git.ts(分支/缓存/diff)、shell.ts、web.ts、logger
 - **外部搜索能力**:`web_search` / `web_fetch` 与 `/search` 已改成 Tavily 优先 /
   Bing 降级,技术查询会更偏向官方文档和主仓库来源。
 - **可观测性基础**:补上 `/debug` 与 `src/util/logger.ts`,日志落在
-  `~/.harness-agent/logs/harness-agent.log`。
+  `~/.light-agent/logs/light-agent.log`。
 - **错误兜底可回归**:`src/util/errors.ts` 承担 CLI 错误分类,已有单测覆盖配置错误、
   临时网络错误、外部工具错误和未知内部错误四类。
 

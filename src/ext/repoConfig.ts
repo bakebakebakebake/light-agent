@@ -43,11 +43,15 @@ function readJson(path: string): RepoAgentConfig | null {
 
 export function repoConfigPaths(cwd: string): {
   primary: string;
-  legacy: string;
+  legacy: string[];
 } {
   return {
-    primary: join(cwd, ".agents", "harness-agent.json"),
-    legacy: join(cwd, ".agent", "harness-agent.json"),
+    primary: join(cwd, ".agents", "light-agent.json"),
+    legacy: [
+      join(cwd, ".agents", "harness-agent.json"),
+      join(cwd, ".agent", "light-agent.json"),
+      join(cwd, ".agent", "harness-agent.json"),
+    ],
   };
 }
 
@@ -55,8 +59,11 @@ export function loadRepoAgentConfig(cwd: string): RepoAgentConfig {
   const { primary, legacy } = repoConfigPaths(cwd);
   const primaryConfig = existsSync(primary) ? readJson(primary) : null;
   if (primaryConfig) return primaryConfig;
-  const legacyConfig = existsSync(legacy) ? readJson(legacy) : null;
-  return legacyConfig ?? { ...DEFAULT_CONFIG };
+  for (const path of legacy) {
+    const legacyConfig = existsSync(path) ? readJson(path) : null;
+    if (legacyConfig) return legacyConfig;
+  }
+  return { ...DEFAULT_CONFIG };
 }
 
 export function saveRepoAgentConfig(cwd: string, config: RepoAgentConfig): string {

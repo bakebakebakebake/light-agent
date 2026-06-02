@@ -67,7 +67,7 @@ export function buildRegistry(): CommandRegistry {
 const exitCommand: SlashCommand = {
   name: "exit",
   aliases: ["quit"],
-  description: "Leave Harness-Agent",
+  description: "Leave Light-Agent",
   priority: -200,
   dangerous: true,
   async run() {

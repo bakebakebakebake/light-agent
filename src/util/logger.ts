@@ -4,10 +4,12 @@ import { storeDir } from "../profiles.js";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
-let debugEnabled = /^(1|true|yes|on)$/i.test(process.env.HARNESS_DEBUG ?? "");
+let debugEnabled = /^(1|true|yes|on)$/i.test(
+  process.env.LIGHT_AGENT_DEBUG ?? process.env.HARNESS_DEBUG ?? "",
+);
 
 function logPath(): string {
-  return join(storeDir(), "logs", "harness-agent.log");
+  return join(storeDir(), "logs", "light-agent.log");
 }
 
 export function isDebugEnabled(): boolean {

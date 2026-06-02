@@ -9,6 +9,7 @@ import {
   magenta,
   dim,
   hr,
+  visibleWidth,
 } from "./theme.js";
 
 /**
@@ -249,12 +250,6 @@ function highlightPlain(seg: string, fam: string): string {
   return s;
 }
 
-/** Visible length of a string, ignoring ANSI escape sequences. */
-function visibleLen(s: string): number {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
-}
-
 /** Split a GFM table row "| a | b |" into trimmed cell strings. */
 function splitRow(row: string): string[] {
   let s = row.trim();
@@ -293,14 +288,14 @@ function renderTable(rows: string[]): string {
 
   const widths: number[] = [];
   for (let c = 0; c < cols; c++) {
-    let w = visibleLen(header[c] ?? "");
-    for (const r of bodyRows) w = Math.max(w, visibleLen(r[c] ?? ""));
+    let w = visibleWidth(header[c] ?? "");
+    for (const r of bodyRows) w = Math.max(w, visibleWidth(r[c] ?? ""));
     widths[c] = Math.max(3, w);
   }
 
   const padCell = (text: string, c: number): string => {
     const w = widths[c] ?? 3;
-    const len = visibleLen(text);
+    const len = visibleWidth(text);
     const space = Math.max(0, w - len);
     const align = aligns[c] ?? "left";
     if (align === "right") return " ".repeat(space) + text;

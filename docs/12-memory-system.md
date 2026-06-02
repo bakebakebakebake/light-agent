@@ -2,7 +2,7 @@
 
 ## 目标
 
-Harness-Agent 的原生记忆系统要解决两件事:
+Light-Agent 的原生记忆系统要解决两件事:
 
 1. 跨会话记住**项目约定、流程、限制、决策**
 2. 跨会话记住**用户偏好与协作风格**
@@ -20,7 +20,7 @@ Harness-Agent 的原生记忆系统要解决两件事:
 
 每个会话会把新增消息追加到:
 
-`~/.harness-agent/memory/transcripts/<session-id>.jsonl`
+`~/.light-agent/memory/transcripts/<session-id>.jsonl`
 
 这是证据层。它负责回答“这条记忆从哪来”，不直接注入 prompt。
 
@@ -29,7 +29,7 @@ Harness-Agent 的原生记忆系统要解决两件事:
 长期记忆以 Markdown card 存放:
 
 - project: `<workdir>/.agents/memory/project/*.md`
-- user: `~/.harness-agent/memory/user/*.md`
+- user: `~/.light-agent/memory/user/*.md`
 
 每张 card 带 frontmatter，包含:
 
@@ -44,7 +44,7 @@ Markdown 是长期真相源，便于人读、diff、手工检查。
 
 ### 3. SQLite Index
 
-`~/.harness-agent/memory/index.sqlite`
+`~/.light-agent/memory/index.sqlite`
 
 SQLite 不是最终真相源，它做三件事:
 
@@ -58,7 +58,7 @@ SQLite 不是最终真相源，它做三件事:
 
 每个项目工作目录都会派生一个小型 digest:
 
-`~/.harness-agent/memory/digests/<hash>.md`
+`~/.light-agent/memory/digests/<hash>.md`
 
 它不是新的真相源，只是从 active memory cards 里挑出最值得常驻的一小批内容。
 

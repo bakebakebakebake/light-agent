@@ -10,8 +10,8 @@ describe("mascot", () => {
   });
 
   it("keeps the product label separate from the art", () => {
-    expect(mascotTagline()).toContain("Harness-Agent");
-    expect(mascot()).not.toContain("Harness-Agent");
+    expect(mascotTagline()).toContain("Light-Agent");
+    expect(mascot()).not.toContain("Light-Agent");
   });
 });
 

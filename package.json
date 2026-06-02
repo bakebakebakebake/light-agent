@@ -1,17 +1,17 @@
 {
-  "name": "harness-agent",
-  "version": "0.4.0",
+  "name": "light-agent-cli",
+  "version": "0.4.1",
   "private": false,
   "type": "module",
-  "description": "A minimal coding agent CLI built from the docs/ architecture reference",
+  "description": "Light-Agent, a local-first coding agent CLI for terminal workflows",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/bakebakebakebake/harness-agent.git"
+    "url": "git+https://github.com/bakebakebakebake/light-agent.git"
   },
-  "homepage": "https://github.com/bakebakebakebake/harness-agent",
+  "homepage": "https://github.com/bakebakebakebake/light-agent",
   "bugs": {
-    "url": "https://github.com/bakebakebakebake/harness-agent/issues"
+    "url": "https://github.com/bakebakebakebake/light-agent/issues"
   },
   "keywords": [
     "agent",
@@ -21,7 +21,7 @@
     "mcp"
   ],
   "bin": {
-    "harness-agent": "./dist/cli.js"
+    "light-agent": "./dist/cli.js"
   },
   "files": [
     "dist",

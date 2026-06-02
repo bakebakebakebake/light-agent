@@ -3,6 +3,8 @@ import { loadSkills, listSkills, type Skill, skillContextBlock } from "../ext/sk
 import { loadRepoAgentConfig, saveRepoAgentConfig } from "../ext/repoConfig.js";
 import {
   colorizeDiff,
+  renderDiffOverview,
+  renderDiffPatchHeader,
   renderDiffFileList,
   summarizeDiffFile,
   truncateDiffPatch,
@@ -48,7 +50,7 @@ function renderDiffSections(
   staged: readonly GitDiffFile[],
   unstaged: readonly GitDiffFile[],
 ): string[] {
-  const sections: string[] = [];
+  const sections: string[] = [...renderDiffOverview(staged, unstaged), ""];
   if (staged.length > 0) sections.push(...renderDiffFileList("Staged changes", staged));
   if (staged.length > 0 && unstaged.length > 0) sections.push("");
   if (unstaged.length > 0) sections.push(...renderDiffFileList("Unstaged changes", unstaged));
@@ -64,13 +66,10 @@ function matchesPathFilter(file: GitDiffFile, needle: string): boolean {
   );
 }
 
-function renderPatch(path: string, raw: string, staged: boolean): string {
-  return [
-    bold(`  ${staged ? "Staged" : "Unstaged"} patch`),
-    `  ${cyan(path)}`,
-    "",
-    colorizeDiff(truncateDiffPatch(raw)),
-  ].join("\n");
+function renderPatch(file: GitDiffFile, raw: string, staged: boolean): string {
+  return [...renderDiffPatchHeader(file, staged), "", colorizeDiff(truncateDiffPatch(raw))].join(
+    "\n",
+  );
 }
 
 export const diffCommand: SlashCommand = {
@@ -136,25 +135,38 @@ export const diffCommand: SlashCommand = {
             staged: isStaged,
             path: patchSource.path,
           });
-          if (patch?.trim()) ctx.out("\n" + renderPatch(patchSource.path, patch, isStaged));
+          if (patch?.trim()) ctx.out("\n" + renderPatch(patchSource, patch, isStaged));
         }
       }
       return {};
     }
 
     while (true) {
+      ctx.clear?.();
+      for (const line of renderDiffSections(stagedFiltered, unstagedFiltered)) ctx.out(line);
       const choice = await ctx.pick("  Diff files", diffPickerItems(stagedFiltered, unstagedFiltered));
       if (!choice) return {};
       const [scope, ...pathParts] = choice.split(":");
       const path = pathParts.join(":");
       const showStaged = scope === "staged";
+      const file = (showStaged ? stagedFiltered : unstagedFiltered).find((entry) => entry.path === path);
+      if (!file) {
+        ctx.out(dim(`  Could not find diff metadata for ${path}.`));
+        continue;
+      }
       const patch = gitDiff(ctx.state.config.workdir, { staged: showStaged, path });
       if (!patch?.trim()) {
         ctx.out(dim(`  No patch available for ${path}.`));
         continue;
       }
-      ctx.out(renderPatch(path, patch.trimEnd(), showStaged));
-      ctx.out(dim("  Pick another file, or press Esc to leave /diff."));
+      ctx.clear?.();
+      ctx.out(renderPatch(file, patch.trimEnd(), showStaged));
+      ctx.out("");
+      const action = await ctx.pick("  Diff actions", [
+        { label: "Back to file list", value: "back", hint: "Choose another changed file" },
+        { label: "Exit /diff", value: "exit", hint: "Return to the main prompt" },
+      ]);
+      if (!action || action === "exit") return {};
     }
     return {};
   },
@@ -265,13 +277,57 @@ function queueSkill(ctx: CommandContext, skill: Skill): void {
   }
 }
 
+function removeQueuedSkill(ctx: CommandContext, name: string): boolean {
+  const needle = name.trim().toLowerCase();
+  if (!needle) return false;
+  const before = ctx.state.pendingContextLabels.length;
+  ctx.state.pendingContextLabels = ctx.state.pendingContextLabels.filter(
+    (label) => label.toLowerCase() !== needle,
+  );
+  ctx.state.pendingContext = ctx.state.pendingContext.filter(
+    (block) => !block.toLowerCase().startsWith(`# skill: ${needle}\n`),
+  );
+  return ctx.state.pendingContextLabels.length !== before;
+}
+
+function skillPickerItems(
+  enabledSkills: Map<string, Skill>,
+  pending: readonly string[],
+): Array<{ label: string; value: string; hint?: string; selectable?: boolean; tone?: "dim" }> {
+  const items: Array<{
+    label: string;
+    value: string;
+    hint?: string;
+    selectable?: boolean;
+    tone?: "dim";
+  }> = [];
+  if (pending.length > 0) {
+    items.push({ label: "Attached skills", value: "__attached__", selectable: false, tone: "dim" });
+    for (const name of pending) {
+      items.push({
+        label: name,
+        value: `remove:${name}`,
+        hint: "Remove from the next message",
+      });
+    }
+    items.push({
+      label: "Clear all attached skills",
+      value: "__clear__",
+      hint: "Drop every queued skill",
+    });
+  }
+  items.push({ label: "Available skills", value: "__available__", selectable: false, tone: "dim" });
+  items.push(...skillItems(enabledSkills));
+  return items;
+}
+
 export const skillCommand: SlashCommand = {
   name: "skill",
   aliases: ["skills"],
-  description: "Pick, attach, list, enable, or disable a Skill",
+  description: "Pick, attach, remove, list, enable, or disable a Skill",
   keywords: ["context", "ability", "prompt"],
   priority: 95,
-  subcommands: ["clear", "list", "enable", "disable"],
+  subcommands: ["clear", "list", "enable", "disable", "remove", "detach", "rm"],
   async run(ctx, args) {
     const cwd = ctx.state.config.workdir;
     const allSkills = loadSkills(cwd, { includeDisabled: true });
@@ -285,6 +341,19 @@ export const skillCommand: SlashCommand = {
       ctx.state.pendingContext = [];
       ctx.state.pendingContextLabels = [];
       ctx.out(green("  Cleared attached skills."));
+      return {};
+    }
+    if (sub === "remove" || sub === "detach" || sub === "rm") {
+      const name = (args[1] ?? "").trim().toLowerCase();
+      if (!name) {
+        ctx.out(dim(`  Usage: /skill ${sub} <name>`));
+        return {};
+      }
+      if (!removeQueuedSkill(ctx, name)) {
+        ctx.out(dim(`  Skill "${name}" is not currently attached.`));
+        return {};
+      }
+      ctx.out(green(`  Removed skill "${name}" from the next message.`));
       return {};
     }
     if (sub === "list") {
@@ -330,8 +399,23 @@ export const skillCommand: SlashCommand = {
         return {};
       }
       if (ctx.pick) {
-        const picked = await ctx.pick("  Attach a skill", skillItems(enabledSkills));
+        const picked = await ctx.pick(
+          "  Manage skills for the next message",
+          skillPickerItems(enabledSkills, ctx.state.pendingContextLabels),
+        );
         if (!picked) {
+          return {};
+        }
+        if (picked === "__clear__") {
+          ctx.state.pendingContext = [];
+          ctx.state.pendingContextLabels = [];
+          ctx.out(green("  Cleared attached skills."));
+          return {};
+        }
+        if (picked.startsWith("remove:")) {
+          const target = picked.slice("remove:".length);
+          removeQueuedSkill(ctx, target);
+          ctx.out(green(`  Removed skill "${target}" from the next message.`));
           return {};
         }
         name = picked.toLowerCase();

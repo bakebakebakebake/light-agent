@@ -79,6 +79,22 @@ describe("toOpenAIMessages", () => {
     ];
     expect(toOpenAIMessages("", msgs)).toEqual([{ role: "user", content: "hi" }]);
   });
+
+  it("replays assistant reasoning_content when present", () => {
+    const msgs: Message[] = [
+      {
+        role: "assistant",
+        reasoningContent: "step by step",
+        content: [{ type: "tool_use", id: "c2", name: "bash", input: {} }],
+      },
+    ];
+    const out = toOpenAIMessages("", msgs);
+    const asst = out[0] as Extract<
+      ReturnType<typeof toOpenAIMessages>[number],
+      { role: "assistant" }
+    >;
+    expect(asst.reasoning_content).toBe("step by step");
+  });
 });
 
 describe("toOpenAITools", () => {

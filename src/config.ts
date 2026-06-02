@@ -86,6 +86,12 @@ function loadDotEnv(cwd: string): void {
   }
 }
 
+function envValue(name: string): string | undefined {
+  const light = `LIGHT_AGENT_${name}`;
+  const legacy = `HARNESS_${name}`;
+  return process.env[light] ?? process.env[legacy];
+}
+
 export interface Config {
   /** Which adapter to use. "anthropic" = native Messages API (or an
    * Anthropic-compatible proxy); "openai" = any OpenAI-compatible endpoint. */
@@ -98,7 +104,7 @@ export interface Config {
   thinkingDepth?: ThinkingDepth;
   /**
    * Optional context-window override in tokens (#11). Wins over the built-in
-   * model→window table when set (profile field or HARNESS_CONTEXT_WINDOW).
+   * model→window table when set (profile field or LIGHT_AGENT_CONTEXT_WINDOW).
    */
   contextWindow?: number;
   /** Working directory the agent is allowed to operate within. */
@@ -134,24 +140,24 @@ export function isConfigured(cwd: string = process.cwd()): boolean {
 
   loadDotEnv(cwd);
   const provider =
-    (process.env.HARNESS_PROVIDER ?? "anthropic").toLowerCase() === "openai"
+    (envValue("PROVIDER") ?? "anthropic").toLowerCase() === "openai"
       ? "openai"
       : "anthropic";
   if (provider === "openai") {
-    return Boolean(process.env.OPENAI_API_KEY && process.env.HARNESS_MODEL);
+    return Boolean(process.env.OPENAI_API_KEY && envValue("MODEL"));
   }
   return Boolean(process.env.ANTHROPIC_API_KEY);
 }
 
 /**
- * Which profile name should be active this run: HARNESS_PROFILE wins (a one-off
- * override that does not mutate the persisted activeProfile), otherwise the
- * store's activeProfile. Returns null if neither resolves to an existing
- * profile.
+ * Which profile name should be active this run: LIGHT_AGENT_PROFILE wins (with
+ * HARNESS_PROFILE kept as a fallback) for a one-off override that does not
+ * mutate the persisted activeProfile. Otherwise the store's activeProfile
+ * wins. Returns null if neither resolves to an existing profile.
  */
 function resolveActiveProfileName(): string | null {
   const store = loadStore();
-  const override = process.env.HARNESS_PROFILE;
+  const override = envValue("PROFILE");
   if (override && override in store.profiles) return override;
   if (store.activeProfile && store.activeProfile in store.profiles) {
     return store.activeProfile;
@@ -161,8 +167,8 @@ function resolveActiveProfileName(): string | null {
 
 /**
  * Resolve the runtime Config (docs/06). Precedence:
- *  1. The active profile in the global store (primary path; HARNESS_PROFILE can
- *     override which profile for one run).
+ *  1. The active profile in the global store (primary path;
+ *     LIGHT_AGENT_PROFILE can override which profile for one run).
  *  2. Otherwise the env/.env path (loadConfig) — kept for power users and CI.
  *  3. If neither yields credentials, returns null so the caller can onboard.
  *
@@ -236,13 +242,15 @@ export function writeEnvEntries(
  *
  * Provider selection (docs/06): the loop only talks to the ModelProvider
  * interface, so swapping providers is purely config.
- *  - HARNESS_PROVIDER=anthropic (default) reads ANTHROPIC_API_KEY and the
+ *  - LIGHT_AGENT_PROVIDER=anthropic (default) reads ANTHROPIC_API_KEY and the
  *    optional ANTHROPIC_BASE_URL (set this to point at an Anthropic-compatible
  *    proxy / 中转站).
- *  - HARNESS_PROVIDER=openai reads OPENAI_API_KEY and OPENAI_BASE_URL, for any
- *    OpenAI-compatible endpoint (OpenRouter, DeepSeek, Kimi, Qwen, local
- *    Ollama/vLLM, …). HARNESS_MODEL is required here since there is no sensible
- *    default model across those services.
+ *  - LIGHT_AGENT_PROVIDER=openai reads OPENAI_API_KEY and OPENAI_BASE_URL, for
+ *    any OpenAI-compatible endpoint (OpenRouter, DeepSeek, Kimi, Qwen, local
+ *    Ollama/vLLM, …). LIGHT_AGENT_MODEL is required here since there is no
+ *    sensible default model across those services.
+ *
+ * Legacy HARNESS_* env vars still work as fallbacks.
  *
  * Throws a clear error if the needed key is missing.
  */
@@ -250,7 +258,7 @@ export function loadConfig(cwd: string = process.cwd()): Config {
   loadDotEnv(cwd);
 
   const provider =
-    (process.env.HARNESS_PROVIDER ?? "anthropic").toLowerCase() === "openai"
+    (envValue("PROVIDER") ?? "anthropic").toLowerCase() === "openai"
       ? "openai"
       : "anthropic";
 
@@ -259,15 +267,15 @@ export function loadConfig(cwd: string = process.cwd()): Config {
     workdir: cwd,
     maxTurns: 50,
     bashTimeoutMs: 120_000,
-    memoryEnabled: parseBoolFlag(process.env.HARNESS_MEMORY_ENABLED, true),
-    memoryExtractEvery: parsePositiveInt(process.env.HARNESS_MEMORY_EXTRACT_EVERY) ?? 3,
+    memoryEnabled: parseBoolFlag(envValue("MEMORY_ENABLED"), true),
+    memoryExtractEvery: parsePositiveInt(envValue("MEMORY_EXTRACT_EVERY")) ?? 3,
     memoryInjectionBudget:
-      parsePositiveInt(process.env.HARNESS_MEMORY_INJECTION_BUDGET) ?? 3000,
-    ...(process.env.HARNESS_THINKING
-      ? { thinkingDepth: parseThinkingDepth(process.env.HARNESS_THINKING) }
+      parsePositiveInt(envValue("MEMORY_INJECTION_BUDGET")) ?? 3000,
+    ...(envValue("THINKING")
+      ? { thinkingDepth: parseThinkingDepth(envValue("THINKING")) }
       : {}),
-    ...(parseContextWindow(process.env.HARNESS_CONTEXT_WINDOW)
-      ? { contextWindow: parseContextWindow(process.env.HARNESS_CONTEXT_WINDOW) }
+    ...(parseContextWindow(envValue("CONTEXT_WINDOW"))
+      ? { contextWindow: parseContextWindow(envValue("CONTEXT_WINDOW")) }
       : {}),
   } as const;
 
@@ -275,16 +283,16 @@ export function loadConfig(cwd: string = process.cwd()): Config {
     const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       throw new Error(
-        "HARNESS_PROVIDER=openai but OPENAI_API_KEY is not set. Add it to " +
+        "LIGHT_AGENT_PROVIDER=openai but OPENAI_API_KEY is not set. Add it to " +
           ".env (and OPENAI_BASE_URL if your provider needs one).",
       );
     }
-    const model = process.env.HARNESS_MODEL;
+    const model = envValue("MODEL");
     if (!model) {
       throw new Error(
-        "HARNESS_PROVIDER=openai requires HARNESS_MODEL (there is no default " +
+        "LIGHT_AGENT_PROVIDER=openai requires LIGHT_AGENT_MODEL (there is no default " +
           "model across OpenAI-compatible providers), " +
-          'e.g. HARNESS_MODEL="deepseek-chat" or "moonshot-v1-8k".',
+          'e.g. LIGHT_AGENT_MODEL="deepseek-chat" or "moonshot-v1-8k".',
       );
     }
     const baseURL = process.env.OPENAI_BASE_URL;
@@ -303,7 +311,7 @@ export function loadConfig(cwd: string = process.cwd()): Config {
   return {
     ...common,
     apiKey,
-    model: process.env.HARNESS_MODEL ?? DEFAULT_MODEL,
+    model: envValue("MODEL") ?? DEFAULT_MODEL,
     ...(baseURL ? { baseURL } : {}),
   };
 }

@@ -17,6 +17,9 @@ afterEach(() => {
   }
   Object.assign(process.env, SAVED);
   delete process.env.ANTHROPIC_API_KEY;
+  delete process.env.LIGHT_AGENT_MEMORY_ENABLED;
+  delete process.env.LIGHT_AGENT_MEMORY_EXTRACT_EVERY;
+  delete process.env.LIGHT_AGENT_MEMORY_INJECTION_BUDGET;
   delete process.env.HARNESS_MEMORY_ENABLED;
   delete process.env.HARNESS_MEMORY_EXTRACT_EVERY;
   delete process.env.HARNESS_MEMORY_INJECTION_BUDGET;
@@ -47,9 +50,9 @@ describe("memory config flags", () => {
 
   it("accepts explicit memory overrides from env", () => {
     process.env.ANTHROPIC_API_KEY = "sk-ant-test";
-    process.env.HARNESS_MEMORY_ENABLED = "false";
-    process.env.HARNESS_MEMORY_EXTRACT_EVERY = "5";
-    process.env.HARNESS_MEMORY_INJECTION_BUDGET = "1200";
+    process.env.LIGHT_AGENT_MEMORY_ENABLED = "false";
+    process.env.LIGHT_AGENT_MEMORY_EXTRACT_EVERY = "5";
+    process.env.LIGHT_AGENT_MEMORY_INJECTION_BUDGET = "1200";
     const cfg = loadConfig(emptyDir);
     expect(cfg.memoryEnabled).toBe(false);
     expect(cfg.memoryExtractEvery).toBe(5);

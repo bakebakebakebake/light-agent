@@ -70,6 +70,8 @@ export interface LineReaderOptions {
   skillMenu?: (query: string) => MenuItem[] | null;
   /** Called when a `#` skill is attached inline to the current draft. */
   attachSkill?: (skillName: string) => void;
+  /** Called when the user backspaces an empty draft to drop the last attached skill. */
+  detachLastSkill?: () => boolean;
   /** Session-plan-mode probe; tints the input frame cyan (#8/#9). */
   planMode?: () => boolean;
   /** Persistent footer row (workdir + branch) beneath the frame (#10). */
@@ -149,12 +151,13 @@ export class LineReader {
       keys: this.keys,
       prompt: present.prompt,
       history: this.history,
-      ...(this.opts.badges ? { badges: this.opts.badges() } : {}),
+      ...(this.opts.badges ? { badges: this.opts.badges } : {}),
       ...(seed ? { seed } : {}),
       ...(menu ? { menu } : {}),
       ...(fileMenu ? { fileMenu } : {}),
       ...(skillMenu ? { skillMenu } : {}),
       ...(this.opts.attachSkill ? { attachSkill: this.opts.attachSkill } : {}),
+      ...(this.opts.detachLastSkill ? { detachLastSkill: this.opts.detachLastSkill } : {}),
       ...(this.opts.planMode ? { planMode: this.opts.planMode } : {}),
       ...(this.opts.footer ? { footer: this.opts.footer } : {}),
     });
@@ -236,6 +239,20 @@ export class LineReader {
 
   close(): void {
     this.keys.stop();
+  }
+
+  /**
+   * Temporarily release raw stdin ownership so a foreground child process can
+   * take over the real terminal, then restore editor input afterwards.
+   */
+  async withTerminalReleased<T>(fn: () => Promise<T>): Promise<T> {
+    if (!this.isTTY) return fn();
+    const restore = this.keys.suspend();
+    try {
+      return await fn();
+    } finally {
+      restore();
+    }
   }
 
   /** Non-TTY line read: cooked readline, one line, no menus/raw mode. */

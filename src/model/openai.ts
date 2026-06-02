@@ -43,6 +43,7 @@ export class OpenAIProvider implements ModelProvider {
   async *stream(req: ModelRequest): AsyncIterable<ModelEvent> {
     const wantThinking = !!req.thinking && req.thinking !== "off";
     const reasoning = isReasoningModel(this.model);
+    const deepSeekThinking = deepSeekThinkingOptions(this.model, req.thinking);
     const tokenCap = req.maxTokens ?? 4096;
     // Base payload shared by all models.
     const body: Record<string, unknown> = {
@@ -58,29 +59,55 @@ export class OpenAIProvider implements ModelProvider {
       // omit it. `reasoning_effort` (low|medium|high) tunes the depth (A1).
       body.max_completion_tokens = tokenCap;
       if (wantThinking) body.reasoning_effort = req.thinking;
+    } else if (deepSeekThinking) {
+      // DeepSeek v4 thinking mode uses a provider-native `thinking` block plus
+      // `reasoning_effort`, even over the OpenAI-compatible endpoint.
+      body.max_tokens = tokenCap;
+      body.thinking = deepSeekThinking.thinking;
+      if (deepSeekThinking.reasoning_effort) {
+        body.reasoning_effort = deepSeekThinking.reasoning_effort;
+      }
+      if (req.temperature !== undefined) body.temperature = req.temperature;
     } else {
       // Non-reasoning models (gpt-4o, deepseek-chat, …) 400 on an unknown
-      // `reasoning_effort` field, so we never send it here. DeepSeek's reasoner
-      // turns thinking on via its model id, not this param, and its
-      // chain-of-thought is captured from `reasoning_content` while streaming.
+      // `reasoning_effort` field, so we never send it here. DeepSeek's older
+      // reasoner family still turns thinking on via its model id, while v4
+      // models are handled in the branch above.
       body.max_tokens = tokenCap;
       if (req.temperature !== undefined) body.temperature = req.temperature;
     }
 
     let resp: Response;
     try {
-      resp = await fetch(`${this.baseURL}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify(body),
-        ...(req.signal ? { signal: req.signal } : {}),
-      });
+      resp = await postJson(`${this.baseURL}/chat/completions`, this.apiKey, body, req.signal);
     } catch (err) {
       yield { type: "error", error: normalizeError(err) };
       return;
+    }
+
+    if (!resp.ok || !resp.body) {
+      let text = await safeText(resp);
+      if (deepSeekThinking && shouldRetryWithoutDeepSeekThinking(resp.status, text)) {
+        const retryBody = { ...body };
+        delete retryBody.thinking;
+        delete retryBody.reasoning_effort;
+        try {
+          resp = await postJson(
+            `${this.baseURL}/chat/completions`,
+            this.apiKey,
+            retryBody,
+            req.signal,
+          );
+          if (resp.ok && resp.body) {
+            text = "";
+          } else {
+            text = await safeText(resp);
+          }
+        } catch (err) {
+          yield { type: "error", error: normalizeError(err) };
+          return;
+        }
+      }
     }
 
     if (!resp.ok || !resp.body) {
@@ -118,9 +145,9 @@ export class OpenAIProvider implements ModelProvider {
  * Non-reasoning chat models (gpt-4o, deepseek-chat, qwen, …) return false so we
  * never send them an unsupported `reasoning_effort` field (which 400s).
  *
- * DeepSeek's reasoner is intentionally NOT matched here: it enables thinking via
- * its model id (deepseek-reasoner) rather than this parameter, and its
- * chain-of-thought is read from the `reasoning_content` stream field.
+ * DeepSeek's older reasoner family is intentionally NOT matched here: it
+ * enables thinking via its model id (`deepseek-reasoner`) rather than this
+ * parameter. DeepSeek v4 thinking is handled separately below.
  */
 export function isReasoningModel(model: string): boolean {
   const m = model.toLowerCase();
@@ -129,6 +156,42 @@ export function isReasoningModel(model: string): boolean {
   // gpt-5 reasoning tiers (gpt-5, gpt-5-mini, …) accept reasoning_effort.
   if (/(^|\/)gpt-5/.test(m)) return true;
   return false;
+}
+
+function supportsDeepSeekThinking(model: string): boolean {
+  return /(^|\/)deepseek-v\d/i.test(model);
+}
+
+function mapDeepSeekReasoningEffort(
+  depth: ModelRequest["thinking"],
+): "high" | "max" | undefined {
+  switch (depth) {
+    case "low":
+    case "medium":
+      return "high";
+    case "high":
+      return "max";
+    default:
+      return undefined;
+  }
+}
+
+function deepSeekThinkingOptions(
+  model: string,
+  depth: ModelRequest["thinking"],
+):
+  | {
+      thinking: { type: "enabled" | "disabled" };
+      reasoning_effort?: "high" | "max";
+    }
+  | null {
+  if (!supportsDeepSeekThinking(model)) return null;
+  const effort = mapDeepSeekReasoningEffort(depth);
+  if (!effort) return { thinking: { type: "disabled" } };
+  return {
+    thinking: { type: "enabled" },
+    reasoning_effort: effort,
+  };
 }
 
 /** Minimal shape of an OpenAI streaming chunk (only fields we read). */
@@ -160,6 +223,30 @@ interface PartialToolCall {
   name: string;
   args: string;
   started: boolean;
+}
+
+async function postJson(
+  url: string,
+  apiKey: string,
+  body: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<Response> {
+  return fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(body),
+    ...(signal ? { signal } : {}),
+  });
+}
+
+function shouldRetryWithoutDeepSeekThinking(status: number, detail: string): boolean {
+  if (status !== 400) return false;
+  return /thinking|reasoning_effort|unknown parameter|unsupported|extra inputs/i.test(
+    detail,
+  );
 }
 
 // PLACEHOLDER_STATE
@@ -278,6 +365,7 @@ type OpenAIMessage =
   | {
       role: "assistant";
       content: string | null;
+      reasoning_content?: string;
       tool_calls?: Array<{
         id: string;
         type: "function";
@@ -317,6 +405,7 @@ export function toOpenAIMessages(
       const msg: Extract<OpenAIMessage, { role: "assistant" }> = {
         role: "assistant",
         content: text.length > 0 ? text : toolUses.length > 0 ? " " : null,
+        ...(m.reasoningContent ? { reasoning_content: m.reasoningContent } : {}),
       };
       if (toolUses.length > 0) {
         msg.tool_calls = toolUses.map((b) => ({

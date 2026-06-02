@@ -43,7 +43,7 @@ export interface EditorOptions {
   keys: KeySource;
   prompt: string;
   /** Visible next-turn context labels, e.g. selected skill names. */
-  badges?: string[];
+  badges?: string[] | (() => string[]);
   /** Initial buffer text. */
   initial?: string;
   /**
@@ -74,6 +74,8 @@ export interface EditorOptions {
   skillMenu?: (query: string) => EditorMenuItem[] | null;
   /** Called when a skill is attached inline through the `#` picker. */
   attachSkill?: (skillName: string) => void;
+  /** Called when backspacing an empty draft should drop the last attached skill. */
+  detachLastSkill?: () => boolean;
   /**
    * Fixed picker list. When set, the editor runs in "pick" mode: arrows select,
    * Enter resolves the chosen value, Esc/Ctrl-C resolves null. No free typing.
@@ -119,14 +121,6 @@ class Editor {
   private col = 0;
   private lastRenderedRows: string[] = [];
   private lastView: RenderView | null = null;
-  /**
-   * Which row (0-indexed from the top of the drawn region) the cursor was left
-   * on after the previous draw. The old code assumed the cursor sat at the
-   * region bottom, but draw() parks it on the input row — so every redraw moved
-   * up too far, making the region climb the screen (jitter) and pickers leave
-   * stale duplicate rows. Tracking the real position fixes #1/#3/#7.
-   */
-  private lastCursorRow = 0;
   private mode: Mode;
   private menuItems: EditorMenuItem[] = [];
   private menuSel = 0;
@@ -151,11 +145,10 @@ class Editor {
   private readonly onTerminalRefresh = (): void => {
     logger.debug("editor terminal refresh");
     if (!this.opts.keys.isTTY) return;
-    this.moveToRegionStart();
+    this.restoreRegionAnchor();
     stdout.write("\x1b[J");
     this.lastRenderedRows = [];
     this.lastView = null;
-    this.lastCursorRow = 0;
     this.draw();
   };
 
@@ -183,6 +176,7 @@ class Editor {
   attach(): void {
     process.on("SIGWINCH", this.onTerminalRefresh);
     process.on("SIGCONT", this.onTerminalRefresh);
+    this.captureRegionAnchor();
     this.draw();
     this.opts.keys.onKey((str, key) => this.onKey(str, key));
   }
@@ -207,13 +201,12 @@ class Editor {
    */
   private collapseToInput(): void {
     if (!this.opts.keys.isTTY) return;
-    this.moveToRegionStart();
+    this.restoreRegionAnchor();
     stdout.write("\x1b[J");
     const view = this.buildCurrentView();
     stdout.write(view.collapseRows.join("\n"));
     this.lastRenderedRows = [];
     this.lastView = null;
-    this.lastCursorRow = 0;
   }
 
   private onKey(str: string | undefined, key: Key): void {
@@ -360,6 +353,13 @@ class Editor {
   }
 
   private onBackspace(): void {
+    if (this.bufferText() === "") {
+      if (this.opts.detachLastSkill?.()) {
+        this.closeMenu();
+        return this.draw();
+      }
+      return;
+    }
     if (this.col > 0) {
       const line = this.lines[this.row] ?? "";
       this.lines[this.row] = line.slice(0, this.col - 1) + line.slice(this.col);
@@ -513,7 +513,7 @@ class Editor {
         stdout.write("\x1b[2J\x1b[H");
         this.lastRenderedRows = [];
         this.lastView = null;
-        this.lastCursorRow = 0;
+        this.captureRegionAnchor();
         break;
       case "d": // EOF on empty buffer is handled by the façade; ignore here
         return;
@@ -711,6 +711,12 @@ class Editor {
   }
 
   private buildCurrentView(): RenderView {
+    const badges =
+      this.mode === "pick" || this.mode === "secret"
+        ? []
+        : typeof this.opts.badges === "function"
+          ? this.opts.badges()
+          : this.opts.badges ?? [];
     return buildRenderView({
       prompt: this.opts.prompt,
       lines: this.lines,
@@ -718,7 +724,7 @@ class Editor {
       col: this.col,
       mode: this.mode,
       cols: stdout.columns ?? 80,
-      badges: this.mode === "pick" || this.mode === "secret" ? [] : this.opts.badges ?? [],
+      badges,
       menuItems: this.menuItems,
       menuSel: this.menuSel,
       footer: this.mode === "pick" || this.mode === "secret" ? "" : this.opts.footer?.() ?? "",
@@ -728,14 +734,20 @@ class Editor {
     });
   }
 
-  private moveToRegionStart(): void {
-    if (this.lastCursorRow > 0) stdout.write(`\x1b[${this.lastCursorRow}A`);
+  private captureRegionAnchor(): void {
+    if (!this.opts.keys.isTTY) return;
+    stdout.write("\x1b7");
+  }
+
+  private restoreRegionAnchor(): void {
+    if (!this.opts.keys.isTTY) return;
+    stdout.write("\x1b8");
     stdout.write("\r");
   }
 
   private paintView(view: RenderView): void {
     if (!this.opts.keys.isTTY) return;
-    this.moveToRegionStart();
+    this.restoreRegionAnchor();
 
     if (shouldFullRedraw(this.lastView, view)) {
       stdout.write("\x1b[J");
@@ -754,7 +766,6 @@ class Editor {
     if (rowsUp > 0) stdout.write(`\x1b[${rowsUp}A`);
     stdout.write("\r");
     if (view.targetCol > 0) stdout.write(`\x1b[${view.targetCol}C`);
-    this.lastCursorRow = view.cursorRowInRegion;
   }
 
   private firstSelectableIndex(items: EditorMenuItem[]): number {

@@ -1,8 +1,8 @@
-# Harness-Agent 原生记忆系统实施计划
+# Light-Agent 原生记忆系统实施计划
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** 在 Harness-Agent 内实现一套原生内建、文件可追溯、可检索、可注入的记忆系统，先把项目记忆和用户偏好记牢，再逐步补自动提炼和长期演化。
+**Goal:** 在 Light-Agent 内实现一套原生内建、文件可追溯、可检索、可注入的记忆系统，先把项目记忆和用户偏好记牢，再逐步补自动提炼和长期演化。
 
 **Architecture:** 以 Markdown 记忆卡为真相源，SQLite 只做索引和检索加速；L0 transcript 只存证据，不直接进 prompt。v1 先把“写入、查询、回溯、注入”跑通，再补自动提炼和冲突处理。和当前 skills 策略协同：流程型 query 同时看 memory 和 skills catalog，但不把整套记忆系统做成重图谱。
 
@@ -52,9 +52,9 @@ Expected: fail because the new module and config flags do not exist yet.
 - 定义 `MemoryCard`, `MemoryDraft`, `MemorySearchHit`, `MemoryContextPacket`, `RawTurn`。
 - 定义固定目录规则：
   - `<workdir>/.agents/memory/project/`
-  - `~/.harness-agent/memory/user/`
-  - `~/.harness-agent/memory/index.sqlite`
-  - `~/.harness-agent/memory/transcripts/`
+  - `~/.light-agent/memory/user/`
+  - `~/.light-agent/memory/index.sqlite`
+  - `~/.light-agent/memory/transcripts/`
 - 在 `config.ts` 里补 memory 开关和预算相关配置，但先只读 env，不扩 profile schema。
 
 **Step 4: Run the focused tests again**

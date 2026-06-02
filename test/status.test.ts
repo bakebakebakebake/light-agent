@@ -7,6 +7,7 @@ import {
   formatContextPercent,
 } from "../src/ui/status.js";
 import { homedir } from "node:os";
+import { visibleWidth } from "../src/ui/theme.js";
 
 /** Strip ANSI so we can assert on visible content + alignment. */
 function plain(s: string): string {
@@ -65,6 +66,16 @@ describe("statusBlock", () => {
     const widths = lines.map((l) => [...l].length);
     // All three border lines share the same visible width.
     expect(new Set(widths).size).toBe(1);
+  });
+
+  it("keeps the frame aligned when the workdir contains wide CJK chars", () => {
+    const lines = plain(
+      statusBlock({
+        ...info,
+        workdir: "/var/项目/应用",
+      }),
+    ).split("\n");
+    expect(new Set(lines.map((line) => visibleWidth(line))).size).toBe(1);
   });
 });
 

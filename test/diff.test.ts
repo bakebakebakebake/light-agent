@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll } from "vitest";
+import type { GitDiffFile } from "../src/util/git.js";
 
 /**
  * theme.ts decides color support from process.stdout.isTTY at import time, and
@@ -7,12 +8,14 @@ import { describe, it, expect, beforeAll } from "vitest";
  */
 let colorizeDiff: (s: string) => string;
 let diffBody: (s: string) => string;
+let renderDiffOverview: (staged: readonly GitDiffFile[], unstaged: readonly GitDiffFile[]) => string[];
 
 beforeAll(async () => {
   (process.stdout as unknown as { isTTY: boolean }).isTTY = true;
   const mod = await import("../src/ui/diff.js");
   colorizeDiff = mod.colorizeDiff;
   diffBody = mod.diffBody;
+  renderDiffOverview = mod.renderDiffOverview;
 });
 
 /** Strip ANSI escapes so content assertions read plainly. */
@@ -85,5 +88,20 @@ describe("diffBody", () => {
 
   it("returns the trimmed input when there is no hunk header", () => {
     expect(plain(diffBody("  no hunks here  "))).toBe("no hunks here");
+  });
+});
+
+describe("renderDiffOverview", () => {
+  it("shows staged and unstaged counts with aggregate stats", () => {
+    const lines = renderDiffOverview(
+      [{ path: "a.ts", status: "modified", additions: 3, deletions: 1 }],
+      [{ path: "b.ts", status: "added", additions: 5, deletions: 0 }],
+    );
+    const text = plain(lines.join("\n"));
+    expect(text).toContain("Diff browser");
+    expect(text).toContain("staged 1");
+    expect(text).toContain("unstaged 1");
+    expect(text).toContain("+8");
+    expect(text).toContain("-1");
   });
 });

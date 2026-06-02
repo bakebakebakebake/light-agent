@@ -50,12 +50,6 @@ export const symbols = {
   branch: "⎇", // git branch (footer, #10)
 } as const;
 
-/** Visible length of a string, ignoring ANSI escape sequences. */
-function visibleLength(s: string): number {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
-}
-
 /**
  * Display width of a string on a terminal: ignores ANSI escapes and counts
  * wide (CJK / fullwidth) code points as 2 columns. Used by the raw-mode line
@@ -70,6 +64,11 @@ export function visibleWidth(s: string): number {
     w += isWide(cp) ? 2 : 1;
   }
   return w;
+}
+
+/** Right-pad a string to the requested visible terminal width. */
+export function padVisibleEnd(s: string, width: number): string {
+  return s + " ".repeat(Math.max(0, width - visibleWidth(s)));
 }
 
 /** Rough East-Asian-wide / fullwidth detection (enough for terminal layout). */
@@ -100,12 +99,11 @@ function isWide(cp: number): boolean {
  */
 export function box(title: string, lines: string[]): string {
   const all = [title, ...lines];
-  const inner = Math.max(...all.map(visibleLength));
-  const pad = (s: string): string => s + " ".repeat(inner - visibleLength(s));
+  const inner = Math.max(...all.map(visibleWidth));
 
   const dash = (n: number): string => "─".repeat(Math.max(0, n));
-  const top = gray("╭─ ") + bold(title) + " " + gray(dash(inner - visibleLength(title) - 1) + "╮");
-  const body = lines.map((l) => gray("│ ") + pad(l) + gray(" │"));
+  const top = gray("╭─ ") + bold(title) + " " + gray(dash(inner - visibleWidth(title) - 1) + "╮");
+  const body = lines.map((l) => gray("│ ") + padVisibleEnd(l, inner) + gray(" │"));
   const bottom = gray("╰" + dash(inner + 2) + "╯");
 
   return [top, ...body, bottom].join("\n");

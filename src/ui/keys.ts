@@ -109,15 +109,11 @@ export class KeySource {
   start(): void {
     if (this.started || !this.isTTY) return;
     this.started = true;
-    stdin.setRawMode(true);
-    stdin.resume();
-    stdout.write("\x1b[?2004h");
-    stdin.on("data", this.onData);
+    this.enableTerminalCapture();
 
     this.restoreOnExit = () => {
       try {
-        stdout.write("\x1b[?2004l");
-        if (stdin.isTTY) stdin.setRawMode(false);
+        this.disableTerminalCapture();
       } catch {
         /* ignore */
       }
@@ -128,7 +124,7 @@ export class KeySource {
   stop(): void {
     if (!this.started) return;
     this.started = false;
-    stdin.off("data", this.onData);
+    this.disableTerminalCapture();
     this.pending = "";
     if (this.restoreOnExit) {
       process.off("exit", this.restoreOnExit);
@@ -141,6 +137,34 @@ export class KeySource {
 
   onKey(handler: KeyHandler | null): void {
     this.handler = handler;
+  }
+
+  /**
+   * Temporarily give stdin/stdout back to a foreground child process.
+   * Returns a restore function that resumes raw capture.
+   */
+  suspend(): () => void {
+    if (!this.started || !this.isTTY) return () => {};
+    this.disableTerminalCapture();
+    this.pending = "";
+    return () => {
+      if (!this.started || !this.isTTY) return;
+      this.enableTerminalCapture();
+    };
+  }
+
+  private enableTerminalCapture(): void {
+    if (!this.isTTY) return;
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdout.write("\x1b[?2004h");
+    stdin.on("data", this.onData);
+  }
+
+  private disableTerminalCapture(): void {
+    stdin.off("data", this.onData);
+    stdout.write("\x1b[?2004l");
+    if (stdin.isTTY) stdin.setRawMode(false);
   }
 
   private onData = (chunk: Buffer): void => {

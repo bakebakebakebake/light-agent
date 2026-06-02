@@ -15,7 +15,7 @@ import type { TodoItem } from "./todos.js";
 /**
  * Session persistence (docs/08, feature #6).
  *
- * Each conversation is saved as JSON under ~/.harness-agent/sessions/<id>.json
+ * Each conversation is saved as JSON under ~/.light-agent/sessions/<id>.json
  * so it can be resumed later, renamed, and listed with timestamps — mirroring
  * Claude Code's resume/rename. Saved next to the profile store (NOT in any
  * repo), and locked 0600 since transcripts can contain sensitive content.

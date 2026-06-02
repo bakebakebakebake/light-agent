@@ -23,7 +23,8 @@ export type Role = "user" | "assistant";
  * provider's native reasoning control:
  *  - Anthropic: `thinking: { type:"enabled", budget_tokens }` (off ⇒ omitted).
  *  - OpenAI-compatible: `reasoning_effort: low|medium|high` (off ⇒ omitted).
- *  - DeepSeek: reasoner is selected by model id; depth is best-effort there.
+ *  - DeepSeek V4: sent as `thinking` + `reasoning_effort`; our `high` maps to
+ *    DeepSeek's highest official tier.
  */
 export type ThinkingDepth = "off" | "low" | "medium" | "high";
 
@@ -42,6 +43,12 @@ export type ContentBlock =
 export interface Message {
   role: Role;
   content: ContentBlock[];
+  /**
+   * Optional provider-native reasoning trace that must be replayed on the next
+   * request for some OpenAI-compatible models (notably DeepSeek thinking mode
+   * when tool calls are involved). Never rendered into the normal transcript.
+   */
+  reasoningContent?: string;
 }
 
 /** A request to the model. */

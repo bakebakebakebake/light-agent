@@ -33,7 +33,7 @@ export function mascot(): string {
 
 /** One-line product label shown next to the mascot on startup. */
 export function mascotTagline(): string {
-  return bold("Harness-Agent") + dim("  · your terminal coding companion");
+  return bold("Light-Agent") + dim("  · your terminal coding companion");
 }
 
 function padVisible(s: string, width: number): string {

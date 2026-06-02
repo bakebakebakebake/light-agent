@@ -1,4 +1,4 @@
-import { gray, bold, cyan, dim, symbols } from "./theme.js";
+import { gray, bold, cyan, dim, symbols, padVisibleEnd, visibleWidth } from "./theme.js";
 import { homedir } from "node:os";
 import type { PermissionMode } from "../permissions/policy.js";
 import type { ThinkingDepth } from "../model/types.js";
@@ -11,7 +11,7 @@ import type { ThinkingDepth } from "../model/types.js";
  * readline prompt (›) is written separately just beneath, since readline owns
  * the editable line.
  *
- *   ╭─ ~/Public/Code/Harness-Agent ─────────────╮
+ *   ╭─ ~/Public/Code/Light-Agent ─────────────╮
  *   │ gpt-4o · 12.3k/128k ctx · plan mode       │
  *   ╰────────────────────────────────────────────╯
  */
@@ -24,12 +24,6 @@ export interface StatusInfo {
   /** Model's context window. */
   total: number;
   mode: PermissionMode;
-}
-
-/** Visible length ignoring ANSI escapes (mirror of theme.box's helper). */
-function visibleLength(s: string): number {
-  // eslint-disable-next-line no-control-regex
-  return s.replace(/\x1b\[[0-9;]*m/g, "").length;
 }
 
 /** Collapse the home dir to ~ for a shorter, friendlier path. */
@@ -103,7 +97,7 @@ export function statusLine(info: {
  * to its right with a branch glyph. A null branch (not a repo / git missing)
  * shows just the path. Single working directory only — no multi-root handling.
  *
- *   ~/Public/Code/Harness-Agent  ⎇ main
+ *   ~/Public/Code/Light-Agent  ⎇ main
  */
 export function workdirLine(info: { workdir: string; branch: string | null }): string {
   const path = dim(tildify(info.workdir));
@@ -114,7 +108,7 @@ export function workdirLine(info: { workdir: string; branch: string | null }): s
 /**
  * Render the framed status block (without the trailing prompt). The frame width
  * adapts to the wider of the title (workdir) and the body line, measured on
- * visible characters so ANSI color never misaligns the border.
+ * visible terminal width so ANSI color and CJK text never misalign the border.
  */
 export function statusBlock(info: StatusInfo): string {
   const title = tildify(info.workdir);
@@ -128,11 +122,11 @@ export function statusBlock(info: StatusInfo): string {
     gray(" · ") +
     cyan(blockModeLabel(info.mode));
 
-  const inner = Math.max(title.length + 1, visibleLength(bodyPlain));
+  const inner = Math.max(visibleWidth(title) + 1, visibleWidth(bodyPlain));
   const dash = (n: number): string => "─".repeat(Math.max(0, n));
 
-  const top = gray("╭─ ") + bold(title) + " " + gray(dash(inner - title.length - 1) + "╮");
-  const mid = gray("│ ") + body + " ".repeat(inner - visibleLength(bodyPlain)) + gray(" │");
+  const top = gray("╭─ ") + bold(title) + " " + gray(dash(inner - visibleWidth(title) - 1) + "╮");
+  const mid = gray("│ ") + padVisibleEnd(body, inner) + gray(" │");
   const bottom = gray("╰" + dash(inner + 2) + "╯");
 
   return [top, mid, bottom].join("\n");

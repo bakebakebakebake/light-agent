@@ -1,5 +1,5 @@
 const DEFAULT_USER_AGENT =
-  "Mozilla/5.0 (compatible; Harness-Agent/0.3; +https://github.com/bakebakebakebake/harness-agent)";
+  "Mozilla/5.0 (compatible; Light-Agent/0.4; +https://github.com/bakebakebakebake/light-agent)";
 
 export type SearchBias = "general" | "technical" | "recent";
 export type SearchBackend = "auto" | "tavily" | "bing";
@@ -245,7 +245,13 @@ async function searchWithBing(query: string, bias: SearchBias): Promise<SearchCa
 
 function preferredBackend(explicit?: SearchBackend): SearchBackend {
   if (explicit && explicit !== "auto") return explicit;
-  const fromEnv = (process.env.HARNESS_SEARCH_BACKEND ?? "auto").trim().toLowerCase();
+  const fromEnv = (
+    process.env.LIGHT_AGENT_SEARCH_BACKEND ??
+    process.env.HARNESS_SEARCH_BACKEND ??
+    "auto"
+  )
+    .trim()
+    .toLowerCase();
   if (fromEnv === "tavily" || fromEnv === "bing") return fromEnv;
   return process.env.TAVILY_API_KEY ? "tavily" : "bing";
 }

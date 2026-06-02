@@ -67,14 +67,22 @@ export interface ProfileStore {
 }
 
 const STORE_FILE = "config.json";
+const STORE_DIR_NAME = ".light-agent";
+const LEGACY_STORE_DIR_NAME = ".harness-agent";
 
 /**
- * Directory that holds the store. Defaults to ~/.harness-agent, but honors
- * HARNESS_HOME so tests (and unusual setups) can point it elsewhere without
- * touching the real home directory.
+ * Directory that holds the store. Prefers ~/.light-agent for fresh installs,
+ * but keeps using ~/.harness-agent when that legacy directory already exists.
+ * Both LIGHT_AGENT_HOME and the legacy HARNESS_HOME override the default.
  */
 export function storeDir(): string {
-  return process.env.HARNESS_HOME ?? join(homedir(), ".harness-agent");
+  const explicit = process.env.LIGHT_AGENT_HOME ?? process.env.HARNESS_HOME;
+  if (explicit) return explicit;
+  const preferred = join(homedir(), STORE_DIR_NAME);
+  const legacy = join(homedir(), LEGACY_STORE_DIR_NAME);
+  if (existsSync(preferred)) return preferred;
+  if (existsSync(legacy)) return legacy;
+  return preferred;
 }
 
 /** Absolute path to the store file. */

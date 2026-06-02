@@ -10,7 +10,7 @@ describe("prompt memory helpers", () => {
     ]);
     expect(joined).toContain("<memory_context>");
     expect(joined).toContain("# Skill: review");
-    expect(joined.startsWith("You are Harness-Agent")).toBe(true);
+    expect(joined.startsWith("You are Light-Agent")).toBe(true);
   });
 
   it("ignores empty prompt blocks", () => {

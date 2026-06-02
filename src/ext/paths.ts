@@ -7,7 +7,7 @@ import { existsSync } from "node:fs";
  *
  * Skills and custom commands are discovered from `.agents` (preferred) or
  * `.agent` directories at two scopes:
- *   - user-level:    $HARNESS_HOME/.agents / ~/.agents
+ *   - user-level:    $LIGHT_AGENT_HOME/.agents / $HARNESS_HOME/.agents / ~/.agents
  *   - workdir-level: <cwd>/.agents
  *
  * Workdir entries override user entries on a name clash, so a project can
@@ -23,9 +23,9 @@ export interface ExtRoot {
   dir: string;
 }
 
-/** Base directory for the user-level extension dir (honors $HARNESS_HOME). */
+/** Base directory for the user-level extension dir (honors LIGHT_AGENT_HOME / HARNESS_HOME). */
 function userBase(): string {
-  return process.env.HARNESS_HOME ?? homedir();
+  return process.env.LIGHT_AGENT_HOME ?? process.env.HARNESS_HOME ?? homedir();
 }
 
 /** All existing `.agents`/`.agent` dirs under `base` (both, if both exist). */

@@ -129,7 +129,13 @@ function makeCtx(answers: string[] = []): {
     pick: async (_prompt, items) => {
       const ans = answers[i++];
       const match = items.find((it) => it.value === ans || it.label === ans);
-      return match?.value ?? ans ?? items[0]?.value ?? null;
+      return (
+        match?.value ??
+        ans ??
+        items.find((it) => it.selectable !== false)?.value ??
+        items[0]?.value ??
+        null
+      );
     },
     clear: () => {},
   };
@@ -734,6 +740,48 @@ describe("/skill", () => {
     await reg.dispatch("/skill clear", ctx);
     expect(state.pendingContext).toEqual([]);
     expect(state.pendingContextLabels).toEqual([]);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("can remove one queued skill without clearing the others", async () => {
+    isolated();
+    const root = mkdtempSync(join(tmpdir(), "skills-"));
+    mkdirSync(join(root, ".agents", "skills", "review"), { recursive: true });
+    mkdirSync(join(root, ".agents", "skills", "docs"), { recursive: true });
+    writeFileSync(
+      join(root, ".agents", "skills", "review", "SKILL.md"),
+      "---\nname: review\ndescription: code review helper\n---\nReview carefully.",
+    );
+    writeFileSync(
+      join(root, ".agents", "skills", "docs", "SKILL.md"),
+      "---\nname: docs\ndescription: docs helper\n---\nDocument the change.",
+    );
+    const reg = buildRegistry();
+    const { ctx, state } = makeCtx();
+    state.config.workdir = root;
+    await reg.dispatch("/skill review", ctx);
+    await reg.dispatch("/skill docs", ctx);
+    await reg.dispatch("/skill remove review", ctx);
+    expect(state.pendingContextLabels).toEqual(["docs"]);
+    expect(state.pendingContext).toEqual(["# Skill: docs\n\nDocument the change."]);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("lets the picker remove already attached skills", async () => {
+    isolated();
+    const root = mkdtempSync(join(tmpdir(), "skills-"));
+    mkdirSync(join(root, ".agents", "skills", "review"), { recursive: true });
+    writeFileSync(
+      join(root, ".agents", "skills", "review", "SKILL.md"),
+      "---\nname: review\ndescription: code review helper\n---\nReview carefully.",
+    );
+    const reg = buildRegistry();
+    const { ctx, state } = makeCtx(["remove:review"]);
+    state.config.workdir = root;
+    await reg.dispatch("/skill review", ctx);
+    await reg.dispatch("/skill", ctx);
+    expect(state.pendingContextLabels).toEqual([]);
+    expect(state.pendingContext).toEqual([]);
     rmSync(root, { recursive: true, force: true });
   });
 

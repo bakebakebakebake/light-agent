@@ -133,6 +133,28 @@ describe("lineEditor seed (#7)", () => {
   });
 });
 
+describe("lineEditor attached-skill backspace removal", () => {
+  it("drops one attached skill at a time when the draft is empty", async () => {
+    const keys = new FakeKeys();
+    const detached: string[] = [];
+    const pending = ["skill-a", "skill-b"];
+    const p = run(keys, {
+      detachLastSkill: () => {
+        const last = pending.pop();
+        if (!last) return false;
+        detached.push(last);
+        return true;
+      },
+    });
+    keys.send("backspace");
+    keys.send("backspace");
+    keys.type("done");
+    keys.send("return");
+    expect(await p).toEqual({ kind: "submit", value: "done" });
+    expect(detached).toEqual(["skill-b", "skill-a"]);
+  });
+});
+
 describe("lineEditor double Esc rewind", () => {
   it("submits /rewind after two Esc presses on an empty prompt", async () => {
     const keys = new FakeKeys();
@@ -269,6 +291,57 @@ describe("lineEditor file menu sync", () => {
   });
 });
 
+describe("lineEditor inline skill badges", () => {
+  it("refreshes badges immediately after attaching a # skill", async () => {
+    const chunks: string[] = [];
+    writeSpy.mockImplementation(((chunk: string | Uint8Array) => {
+      chunks.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write);
+
+    const keys = new TtyKeys();
+    const badges: string[] = [];
+    const p = run(keys, {
+      skillMenu: (query: string) =>
+        query.startsWith("rev")
+          ? [{ label: "review", value: "review", hint: "project skill" }]
+          : null,
+      attachSkill: (name: string) => {
+        badges.push(`skills: ${name}`);
+      },
+      badges: () => badges,
+    });
+
+    chunks.length = 0;
+    keys.type("#rev");
+    keys.send("return");
+    expect(chunks.join("")).toContain("skills: review");
+
+    keys.type("hello");
+    keys.send("return");
+    expect(await p).toEqual({ kind: "submit", value: "hello" });
+  });
+
+  it("drops attached skills one by one when backspacing an empty draft", async () => {
+    const keys = new FakeKeys();
+    const badges = ["skills: review", "skills: docs"];
+    const p = run(keys, {
+      badges: () => badges,
+      detachLastSkill: () => {
+        if (badges.length === 0) return false;
+        badges.pop();
+        return true;
+      },
+    });
+    keys.send("backspace");
+    keys.send("backspace");
+    keys.type("hello");
+    keys.send("return");
+    expect(badges).toEqual([]);
+    expect(await p).toEqual({ kind: "submit", value: "hello" });
+  });
+});
+
 describe("lineEditor render views", () => {
   it("builds a frame view with menu rows and footer rows", () => {
     const view = buildRenderView({
@@ -359,6 +432,25 @@ describe("lineEditor render views", () => {
 });
 
 describe("lineEditor TTY redraws", () => {
+  it("anchors redraws with save/restore cursor sequences", async () => {
+    const chunks: string[] = [];
+    writeSpy.mockImplementation(((chunk: string | Uint8Array) => {
+      chunks.push(String(chunk));
+      return true;
+    }) as typeof process.stdout.write);
+
+    const keys = new TtyKeys();
+    const p = run(keys);
+
+    expect(chunks.join("")).toContain("\x1b7");
+    chunks.length = 0;
+    keys.type("a");
+    expect(chunks.join("")).toContain("\x1b8");
+
+    keys.send("return");
+    await p;
+  });
+
   it("full redraws on menu open but not on menu navigation", async () => {
     const chunks: string[] = [];
     writeSpy.mockImplementation(((chunk: string | Uint8Array) => {

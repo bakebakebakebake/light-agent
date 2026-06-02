@@ -127,6 +127,19 @@ describe("OpenAI request maps depth per model class", () => {
     expect(body).not.toContain("reasoning_effort");
     expect(body).toContain('"max_completion_tokens"');
   });
+
+  it("maps DeepSeek v4 depth onto thinking + provider-native effort", async () => {
+    const body = await captureBody("deepseek-v4-flash", "high");
+    expect(body).toContain('"thinking":{"type":"enabled"}');
+    expect(body).toContain('"reasoning_effort":"max"');
+    expect(body).toContain('"max_tokens"');
+  });
+
+  it("disables DeepSeek v4 thinking explicitly when depth is off", async () => {
+    const body = await captureBody("deepseek-v4-flash", "off");
+    expect(body).toContain('"thinking":{"type":"disabled"}');
+    expect(body).not.toContain('"reasoning_effort"');
+  });
 });
 
 describe("isReasoningModel", () => {

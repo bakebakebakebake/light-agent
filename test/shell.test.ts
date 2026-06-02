@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { runProcess, runShell } from "../src/util/shell.js";
+import {
+  foregroundCommandLine,
+  foregroundShellArgv,
+  runProcess,
+  runShell,
+} from "../src/util/shell.js";
 
 const cwd = process.cwd();
 
@@ -79,5 +84,33 @@ describe("runShell (raw line, shell:true)", () => {
   it("propagates a non-zero exit status", async () => {
     const r = await runShell("exit 7", { cwd, timeoutMs: 5000 });
     expect(r.exitCode).toBe(7);
+  });
+});
+
+describe("foreground shell wrappers", () => {
+  it("sources zsh startup files, then evals the command so aliases can expand", () => {
+    const argv = foregroundShellArgv("/bin/zsh", "ll", {
+      cwd,
+      timeoutMs: 5000,
+      loginShell: true,
+      interactiveShell: true,
+    });
+    expect(argv[0]).toBe("-lc");
+    expect(argv[1]).toContain("source ~/.zprofile");
+    expect(argv[1]).toContain("source ~/.zshrc");
+    expect(argv[1]).toContain("eval -- 'll'");
+    expect(argv[1]).not.toContain("-ilc");
+  });
+
+  it("enables alias expansion for bash foreground commands, then evals the line", () => {
+    const command = foregroundCommandLine("/bin/bash", "ll", {
+      cwd,
+      timeoutMs: 5000,
+      interactiveShell: true,
+    });
+    expect(command).toContain("shopt -s expand_aliases");
+    expect(command).toContain("source ~/.bash_profile");
+    expect(command).toContain("source ~/.bashrc");
+    expect(command).toContain("eval -- 'll'");
   });
 });

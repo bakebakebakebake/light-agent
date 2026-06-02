@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { renderMarkdown, renderInline, MarkdownStream } from "../src/ui/markdown.js";
+import { visibleWidth } from "../src/ui/theme.js";
 
 // ANSI helpers (theme uses these codes when stdout is a TTY; in the test
 // runner stdout is NOT a TTY, so color is disabled and output is plain text).
@@ -128,6 +129,19 @@ describe("GFM tables", () => {
     for (const ch of table) md.push(ch);
     md.flush();
     expect(acc.replace(/\n$/, "")).toBe(renderMarkdown(table));
+  });
+
+  it("keeps borders aligned for wide CJK cells", () => {
+    const wideTable = [
+      "| 奖项 | 得主 |",
+      "|---|---|",
+      "| 最佳男主角 | Michael B. Jordan —《Sinners》 |",
+      "| 最佳国际影片 | 挪威《Sentimental Value》 |",
+      "| 最佳动画长片 | 《KPop Demon Hunters》 |",
+    ].join("\n");
+    const out = renderMarkdown(wideTable).split("\n");
+    expect(out).toHaveLength(7);
+    expect(new Set(out.map((line) => visibleWidth(line))).size).toBe(1);
   });
 });
 

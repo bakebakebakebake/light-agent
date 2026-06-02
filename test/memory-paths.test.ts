@@ -40,7 +40,7 @@ describe("memory paths", () => {
     const projectDir = projectMemoryDir(cwd);
     expect(projectDir).toBe(join(cwd, ".agents", "memory", "project"));
     expect(projectDir.startsWith(join(cwd, ".agents"))).toBe(true);
-    expect(projectDir.includes(`${homedir()}/.harness-agent`)).toBe(false);
+    expect(projectDir.includes(`${homedir()}/.light-agent`)).toBe(false);
     rmSync(cwd, { recursive: true, force: true });
   });
 });

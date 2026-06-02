@@ -15,6 +15,8 @@ afterEach(() => {
     if (!(k in SAVED)) delete process.env[k];
   }
   Object.assign(process.env, SAVED);
+  delete process.env.LIGHT_AGENT_PROVIDER;
+  delete process.env.LIGHT_AGENT_MODEL;
   delete process.env.HARNESS_PROVIDER;
   delete process.env.HARNESS_MODEL;
   delete process.env.ANTHROPIC_API_KEY;
@@ -24,6 +26,8 @@ afterEach(() => {
 });
 
 function reset() {
+  delete process.env.LIGHT_AGENT_PROVIDER;
+  delete process.env.LIGHT_AGENT_MODEL;
   delete process.env.HARNESS_PROVIDER;
   delete process.env.HARNESS_MODEL;
   delete process.env.ANTHROPIC_API_KEY;
@@ -57,17 +61,17 @@ describe("loadConfig — provider selection", () => {
 
   it("selects openai and requires a model", () => {
     reset();
-    process.env.HARNESS_PROVIDER = "openai";
+    process.env.LIGHT_AGENT_PROVIDER = "openai";
     process.env.OPENAI_API_KEY = "sk-test";
-    expect(() => loadConfig(emptyDir)).toThrow(/HARNESS_MODEL/);
+    expect(() => loadConfig(emptyDir)).toThrow(/LIGHT_AGENT_MODEL/);
   });
 
   it("builds an openai config with base URL and model", () => {
     reset();
-    process.env.HARNESS_PROVIDER = "openai";
+    process.env.LIGHT_AGENT_PROVIDER = "openai";
     process.env.OPENAI_API_KEY = "sk-test";
     process.env.OPENAI_BASE_URL = "https://api.deepseek.com/v1";
-    process.env.HARNESS_MODEL = "deepseek-chat";
+    process.env.LIGHT_AGENT_MODEL = "deepseek-chat";
     const cfg = loadConfig(emptyDir);
     expect(cfg.provider).toBe("openai");
     expect(cfg.model).toBe("deepseek-chat");
@@ -76,9 +80,19 @@ describe("loadConfig — provider selection", () => {
 
   it("throws when openai is selected without a key", () => {
     reset();
-    process.env.HARNESS_PROVIDER = "openai";
-    process.env.HARNESS_MODEL = "deepseek-chat";
+    process.env.LIGHT_AGENT_PROVIDER = "openai";
+    process.env.LIGHT_AGENT_MODEL = "deepseek-chat";
     expect(() => loadConfig(emptyDir)).toThrow(/OPENAI_API_KEY/);
+  });
+
+  it("still accepts legacy HARNESS_* env names as a fallback", () => {
+    reset();
+    process.env.HARNESS_PROVIDER = "openai";
+    process.env.OPENAI_API_KEY = "sk-test";
+    process.env.HARNESS_MODEL = "deepseek-chat";
+    const cfg = loadConfig(emptyDir);
+    expect(cfg.provider).toBe("openai");
+    expect(cfg.model).toBe("deepseek-chat");
   });
 });
 

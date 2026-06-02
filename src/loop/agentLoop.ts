@@ -97,6 +97,7 @@ export async function* runAgentLoop(
 
     // --- call the model, accumulating assistant content for this turn ---
     let textBuf = "";
+    let reasoningBuf = "";
     const pending = new Map<string, PendingToolCall>();
     const order: string[] = [];
     let fatal: { message: string; retryable: boolean } | null = null;
@@ -114,8 +115,10 @@ export async function* runAgentLoop(
         textBuf += ev.text;
         yield { type: "text_delta", text: ev.text };
       } else if (ev.type === "reasoning_delta") {
-        // Reasoning is surfaced live but never written to message history — it
-        // is not replayed on the next request (A1).
+        // Reasoning is surfaced live. Some providers also require it to be
+        // replayed on the next request, so we persist the raw trace alongside
+        // the assistant turn while keeping it out of the normal transcript.
+        reasoningBuf += ev.text;
         yield { type: "reasoning", text: ev.text };
       } else if (ev.type === "tool_use_start") {
         pending.set(ev.id, { id: ev.id, name: ev.name, partialJson: "" });
@@ -141,6 +144,7 @@ export async function* runAgentLoop(
         messages.push({
           role: "assistant",
           content: [{ type: "text", text: textBuf }],
+          ...(reasoningBuf ? { reasoningContent: reasoningBuf } : {}),
         });
       } else if (messages[messages.length - 1]?.role === "user") {
         messages.pop();
@@ -173,7 +177,11 @@ export async function* runAgentLoop(
       });
     }
     if (assistantBlocks.length > 0) {
-      messages.push({ role: "assistant", content: assistantBlocks });
+      messages.push({
+        role: "assistant",
+        content: assistantBlocks,
+        ...(reasoningBuf ? { reasoningContent: reasoningBuf } : {}),
+      });
     }
 
     // --- no tool calls → final answer, normal stop ---

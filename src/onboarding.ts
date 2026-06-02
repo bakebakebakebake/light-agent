@@ -18,7 +18,7 @@ import { fetchModels as defaultFetchModels, type FetchModels } from "./model/mod
  * When the CLI starts with no credentials configured, we walk the user through
  * a short setup instead of erroring out: pick a provider, paste an API key, and
  * (for OpenAI-compatible endpoints) name a base URL + model. The answers become
- * a named profile in the global store (~/.harness-agent/config.json) and are
+ * a named profile in the global store (~/.light-agent/config.json) and are
  * set active, so the same session can continue straight into the REPL.
  *
  * Security (docs/04): the API key is typed by the real user on stdin — we never
@@ -91,9 +91,9 @@ async function collectAnthropic(
   ).model;
 
   const entries: Record<string, string> = {
-    HARNESS_PROVIDER: "anthropic",
+    LIGHT_AGENT_PROVIDER: "anthropic",
     ANTHROPIC_API_KEY: apiKey,
-    HARNESS_MODEL: model,
+    LIGHT_AGENT_MODEL: model,
   };
   if (baseURL) entries.ANTHROPIC_BASE_URL = baseURL;
 
@@ -125,9 +125,9 @@ async function collectOpenAI(
   ).model;
 
   const entries: Record<string, string> = {
-    HARNESS_PROVIDER: "openai",
+    LIGHT_AGENT_PROVIDER: "openai",
     OPENAI_API_KEY: apiKey,
-    HARNESS_MODEL: model,
+    LIGHT_AGENT_MODEL: model,
   };
   if (baseURL) entries.OPENAI_BASE_URL = baseURL;
 
