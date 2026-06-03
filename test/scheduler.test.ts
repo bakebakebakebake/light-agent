@@ -20,6 +20,13 @@ describe("scheduler store helpers", () => {
 
   it("computes the next daily run after the reference time", () => {
     const next = computeNextRunAt("daily", "09:30", "2026-06-03T10:00:00.000Z");
-    expect(next).toBe("2026-06-04T01:30:00.000Z");
+    expect(next).toBeTruthy();
+    const scheduled = new Date(next!);
+    expect(scheduled.getFullYear()).toBe(2026);
+    expect(scheduled.getMonth()).toBe(5);
+    expect(scheduled.getDate()).toBe(4);
+    expect(scheduled.getHours()).toBe(9);
+    expect(scheduled.getMinutes()).toBe(30);
+    expect(scheduled.getSeconds()).toBe(0);
   });
 });
