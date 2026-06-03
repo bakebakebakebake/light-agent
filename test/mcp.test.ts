@@ -10,12 +10,19 @@ import { LocalMcpRuntime } from "../src/mcp/runtime.js";
 import type { McpRuntime, McpToolCandidate } from "../src/mcp/types.js";
 
 let dir: string;
+const SAVED_ENV = { ...process.env };
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "mcp-"));
+  process.env.LIGHT_AGENT_HOME = dir;
+  delete process.env.HARNESS_HOME;
 });
 
 afterEach(() => {
+  for (const key of Object.keys(process.env)) {
+    if (!(key in SAVED_ENV)) delete process.env[key];
+  }
+  Object.assign(process.env, SAVED_ENV);
   rmSync(dir, { recursive: true, force: true });
 });
 
