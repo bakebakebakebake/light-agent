@@ -170,6 +170,17 @@ async function fetchText(url: string, init?: RequestInit): Promise<string> {
   return await res.text();
 }
 
+async function readJsonResponse<T>(res: Response, label: string): Promise<T> {
+  const raw = await res.text();
+  try {
+    return JSON.parse(raw) as T;
+  } catch (err) {
+    const detail =
+      raw.trim().slice(0, 180) || (err instanceof Error ? err.message : "empty response");
+    throw new Error(`Invalid JSON from ${label}: ${detail}`);
+  }
+}
+
 async function searchWithTavily(query: string, opts: Required<Pick<SearchWebOptions, "limit" | "bias">>): Promise<SearchCandidate[]> {
   const apiKey = process.env.TAVILY_API_KEY;
   if (!apiKey) throw new Error("TAVILY_API_KEY is not set");
@@ -193,14 +204,14 @@ async function searchWithTavily(query: string, opts: Required<Pick<SearchWebOpti
   if (!res.ok) {
     throw new Error(`HTTP ${res.status} from Tavily`);
   }
-  const json = (await res.json()) as {
+  const json = await readJsonResponse<{
     results?: Array<{
       title?: string;
       url?: string;
       content?: string;
       published_date?: string;
     }>;
-  };
+  }>(res, "Tavily");
   return (json.results ?? [])
     .filter((item) => item.title && item.url)
     .map((item) => ({

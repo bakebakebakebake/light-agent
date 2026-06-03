@@ -21,6 +21,7 @@ export const yellow = (s: string): string => wrap("33", s);
 export const green = (s: string): string => wrap("32", s);
 export const magenta = (s: string): string => wrap("35", s);
 export const gray = (s: string): string => wrap("90", s);
+export const bgDark = (s: string): string => wrap("100", s);
 
 /**
  * Inline-code styling. Uses a foreground color only (no background escape) so it

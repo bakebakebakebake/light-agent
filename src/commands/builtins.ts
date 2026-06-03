@@ -42,6 +42,12 @@ import { contextWindowFor } from "../model/contextWindow.js";
 import { humanTokens, formatContextPercent } from "../ui/status.js";
 import { bold, cyan, dim, green, yellow, red, symbols } from "../ui/theme.js";
 import { cloneTodos, formatTodoList } from "../todos.js";
+import {
+  mcpAttachment,
+  pushPendingAttachment,
+  removePendingAttachment,
+  clearPendingAttachmentsByKind,
+} from "../pendingContext.js";
 
 /**
  * Built-in slash commands (docs/08).
@@ -89,7 +95,7 @@ const clearCommand: SlashCommand = {
     });
     ctx.state.todos = [];
     ctx.state.pendingContext = [];
-    ctx.state.pendingContextLabels = [];
+    ctx.state.pendingAttachments = [];
     ctx.out(dim("  Conversation cleared."));
     return {};
   },
@@ -534,20 +540,91 @@ const keysCommand: SlashCommand = {
 };
 const mcpCommand: SlashCommand = {
   name: "mcp",
-  description: "Show MCP server status",
+  description: "Show, attach, or remove MCP server hints",
   keywords: ["server", "tools"],
   priority: 90,
-  subcommands: ["list"],
+  subcommands: ["list", "use", "attach", "remove", "detach", "rm", "clear"],
   async run(ctx, args) {
-    const sub = (args[0] ?? "list").trim().toLowerCase();
-    if (sub !== "list") {
-      ctx.out(red(`  Unknown subcommand "/mcp ${args[0]}". Try: list.`));
-      return {};
-    }
     const defs = loadMcpServerDefinitions(ctx.state.config.workdir);
     const status = ctx.mcpStatus?.() ?? [];
     if (defs.length === 0 && status.length === 0) {
       ctx.out(dim("  No MCP servers configured. Add JSON files under .agents/mcp or .agent/mcp."));
+      return {};
+    }
+    const sub = (args[0] ?? "").trim().toLowerCase();
+
+    const queueServer = (name: string): boolean => {
+      const def = defs.find((item) => item.name === name.toLowerCase());
+      if (!def) return false;
+      pushPendingAttachment(ctx.state, mcpAttachment(def.name, def.description));
+      return true;
+    };
+
+    if (sub === "clear") {
+      clearPendingAttachmentsByKind(ctx.state, "mcp");
+      ctx.out(green("  Cleared attached MCP servers."));
+      return {};
+    }
+    if (sub === "use" || sub === "attach") {
+      const name = args.slice(1).join(" ").trim().toLowerCase();
+      if (!name) {
+        ctx.out(dim("  Usage: /mcp use <server>"));
+        return {};
+      }
+      if (!queueServer(name)) {
+        ctx.out(red(`  No MCP server "${name}". Type /mcp list to inspect configured servers.`));
+        return {};
+      }
+      ctx.state.seedInput ??= "";
+      return {};
+    }
+    if (sub === "remove" || sub === "detach" || sub === "rm") {
+      const name = args.slice(1).join(" ").trim().toLowerCase();
+      if (!name) {
+        ctx.out(dim(`  Usage: /mcp ${sub} <server>`));
+        return {};
+      }
+      if (!removePendingAttachment(ctx.state, "mcp", name)) {
+        ctx.out(dim(`  MCP server "${name}" is not currently attached.`));
+        return {};
+      }
+      ctx.out(green(`  Removed MCP server "${name}" from the next message.`));
+      return {};
+    }
+
+    if (!sub && ctx.pick) {
+      const items: Array<{
+        label: string;
+        value: string;
+        hint?: string;
+        selectable?: boolean;
+        tone?: "dim";
+      }> = [
+        { label: "Available MCP servers", value: "__available__", selectable: false, tone: "dim" as const },
+      ];
+      for (const def of defs) {
+        const live = status.find((item) => item.name === def.name);
+        items.push({
+          label: def.name,
+          value: `use:${def.name}`,
+          hint:
+            `${live?.connected ? "connected" : "idle"} ${symbols.dot} ` +
+            `${live?.loadedTools ?? 0} tool(s) ${symbols.dot} ${def.scope}` +
+            (def.description ? ` ${symbols.dot} ${def.description}` : ""),
+        });
+      }
+      const picked = await ctx.pick("  Choose an MCP server", items);
+      if (!picked) return {};
+      if (picked.startsWith("use:")) {
+        const target = picked.slice("use:".length);
+        queueServer(target);
+        ctx.state.seedInput ??= "";
+        return {};
+      }
+    }
+
+    if (sub && sub !== "list") {
+      ctx.out(red(`  Unknown subcommand "/mcp ${args[0]}". Try: list.`));
       return {};
     }
     ctx.out(bold("  MCP servers"));
@@ -565,6 +642,7 @@ const mcpCommand: SlashCommand = {
       if (def.description) ctx.out(`  ${dim(" ".repeat(18) + def.description)}`);
     }
     ctx.out(dim("  Matching tools are still loaded on demand through mcp_search."));
+    ctx.out(dim("  Attach one with /mcp use <server> so the next turn prefers that server."));
     return {};
   },
 };

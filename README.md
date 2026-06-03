@@ -85,6 +85,7 @@ Useful commands inside the app:
 - `/mcp`
 - `/usage`
 - `/protect`
+- `/config search`
 
 ## Interaction Highlights
 
@@ -94,10 +95,16 @@ Useful commands inside the app:
   skill, keep typing, and the current draft keeps a visible `skills:` badge.
   Inline `#skill` picks and `/skill` picks now share the same badge path, so
   both appear immediately in the current draft.
+- When the draft is empty, `Backspace` now removes attached next-turn items one
+  by one in reverse order, across both queued skills and queued MCP server
+  hints.
+- If the draft already has text, `↑` now steps into the attached `skills:` and
+  `mcp:` rows before history recall. Inside those rows, `←` / `→` moves across
+  attached items and `Backspace` removes the highlighted one.
 - `/skill` opens the same searchable picker, and also supports
   `/skill list`, `/skill enable <name>`, `/skill disable <name>`, and
-  `/skill clear`. The picker now also shows currently attached skills, so you
-  can remove one skill or clear them all without leaving the flow.
+  `/skill clear`. The no-arg picker now goes straight to available skills and
+  attaches the one you choose without an extra management step.
 - Disabled skills stay out of the always-on skill catalog, out of automatic
   retrieval, and out of the inline picker until you re-enable them.
 - `/diff` now starts from changed files, then lets you inspect a patch for the
@@ -107,11 +114,19 @@ Useful commands inside the app:
 - `/search <query>` now uses Tavily first when `TAVILY_API_KEY` is present, then
   falls back to Bing. Results keep source, backend, URL, and dates so they stay
   easy to verify.
+- If you mainly use the npm-installed CLI, you do not need a repo-local `.env`
+  for search config. Use `/config search` to store `TAVILY_API_KEY` and
+  `LIGHT_AGENT_SEARCH_BACKEND` into the global env file under
+  `~/.light-agent/env`.
+- `/config` and `/config search` both support picker flows in TTY mode, so you
+  can choose search backend / key actions without memorizing every subcommand.
 - `!` commands now run in the real foreground TTY through your login +
   interactive shell, so aliases such as `ll` work more like your local
   terminal. Foreground execution now avoids the job-control path that could
   suspend commands with `tty input` or `tty output`.
-- `/mcp` shows configured servers plus live connection / loaded-tool state.
+- `/mcp` shows configured servers plus live connection / loaded-tool state, and
+  `/mcp` or `/mcp use <server>` attaches that server to the next message with a
+  visible `mcp:` badge.
 - `/protect` lets you block risky model-side command patterns and protect repo
   paths from accidental edits or destructive shell calls.
 - `/debug on` writes structured logs to `~/.light-agent/logs/light-agent.log`
@@ -141,6 +156,31 @@ Notes:
 - `protectedPaths` blocks model-driven `edit` / `write`, and also blocks shell
   commands that obviously target those paths.
 - User-typed `!` commands are not blocked by `/protect`.
+
+## Search Config
+
+For web search, Light-Agent checks config in this order:
+
+1. shell env
+2. project env file: `<workdir>/.env`
+3. global env file: `~/.light-agent/env`
+
+Useful commands:
+
+```text
+/config
+/config search
+/config search backend auto
+/config search backend tavily
+/config search tavily-key
+/config search clear-tavily-key
+```
+
+The actual search key name is still:
+
+```text
+TAVILY_API_KEY
+```
 
 ## Memory
 

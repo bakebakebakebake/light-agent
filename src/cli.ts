@@ -24,7 +24,7 @@ import { loadStore, storePath } from "./profiles.js";
 import { newSession, saveSession, deriveTitle } from "./sessions.js";
 import { loadCustomCommandDefs, buildCustomCommands } from "./ext/commands.js";
 import { loadSkills, formatSkillCatalog } from "./ext/skills.js";
-import { type Skill, skillContextBlock } from "./ext/skills.js";
+import { type Skill } from "./ext/skills.js";
 import { loadRepoAgentConfig } from "./ext/repoConfig.js";
 import { searchFiles } from "./ext/fileSearch.js";
 import { runForegroundShell } from "./util/shell.js";
@@ -43,27 +43,21 @@ import { extractAndApplyMemory } from "./memory/extract.js";
 import { writeCoreDigest } from "./memory/digest.js";
 import { logger } from "./util/logger.js";
 import { classifyRuntimeError } from "./util/errors.js";
+import {
+  attachmentBadges,
+  groupPendingAttachments,
+  popPendingAttachment,
+  pushPendingAttachment,
+  removePendingAttachment,
+  skillAttachment,
+} from "./pendingContext.js";
 
 function attachSkillToState(state: SessionState, skill: Skill): void {
-  const block = skillContextBlock(skill);
-  if (!state.pendingContext.includes(block)) state.pendingContext.push(block);
-  if (!state.pendingContextLabels.includes(skill.name)) {
-    state.pendingContextLabels.push(skill.name);
-  }
+  pushPendingAttachment(state, skillAttachment(skill));
 }
 
-function detachLastSkillFromState(state: SessionState): boolean {
-  const last = state.pendingContextLabels[state.pendingContextLabels.length - 1];
-  if (!last) return false;
-  state.pendingContextLabels = state.pendingContextLabels.slice(0, -1);
-  const prefix = `# skill: ${last.toLowerCase()}\n`;
-  for (let i = state.pendingContext.length - 1; i >= 0; i -= 1) {
-    if (state.pendingContext[i]?.toLowerCase().startsWith(prefix)) {
-      state.pendingContext.splice(i, 1);
-      break;
-    }
-  }
-  return true;
+function detachLastPendingAttachment(state: SessionState): boolean {
+  return popPendingAttachment(state) !== null;
 }
 
 /**
@@ -130,7 +124,11 @@ async function main(): Promise<void> {
       if (!skill) return;
       attachSkillToState(state, skill);
     },
-    detachLastSkill: () => detachLastSkillFromState(state),
+    badges: () => attachmentBadges(state.pendingAttachments),
+    detachLastSkill: () => detachLastPendingAttachment(state),
+    attachments: () => groupPendingAttachments(state.pendingAttachments),
+    detachAttachment: (kind, label) =>
+      removePendingAttachment(state, kind, label),
     // Tint the input frame cyan in plan mode (#8). `state` is initialized below
     // and this runs lazily on each draw, so it always sees the live mode.
     planMode: () => state.mode === "plan",
@@ -139,18 +137,6 @@ async function main(): Promise<void> {
       workdir: state.config.workdir,
       branch: gitBranchCached(state.config.workdir),
     }),
-    badges: () => {
-      const badges: string[] = [];
-      if (state.pendingContextLabels.length > 0) {
-        badges.push(`skills: ${state.pendingContextLabels.join(", ")}`);
-      }
-      const connectedMcp = mcp
-        .status()
-        .filter((item) => item.connected)
-        .map((item) => item.name);
-      if (connectedMcp.length > 0) badges.push(`mcp: ${connectedMcp.join(", ")}`);
-      return badges;
-    },
   });
   const ask = (prompt: string, opts?: { secret?: boolean }): Promise<string> =>
     opts?.secret ? reader.askSecret(prompt) : reader.ask(prompt);
@@ -218,7 +204,7 @@ async function main(): Promise<void> {
     },
     todos: [],
     pendingContext: [],
-    pendingContextLabels: [],
+    pendingAttachments: [],
     refreshSkills() {
       skillCatalog = formatSkillCatalog(loadSkills(this.config.workdir));
       this.skillCatalog = skillCatalog;
@@ -483,7 +469,7 @@ async function main(): Promise<void> {
       : "";
     const extraContext = state.pendingContext;
     state.pendingContext = [];
-    state.pendingContextLabels = [];
+    state.pendingAttachments = [];
     const system = appendPromptBlocks(
       systemPrompt(state.config.workdir, state.skillCatalog),
       [memoryBlock, ...extraContext],
@@ -562,7 +548,11 @@ async function main(): Promise<void> {
   }
 
   reader.close();
-  stdout.write(dim("Bye.\n"));
+  stdout.write(
+    dim(
+      `Bye. Session: ${state.session.title} (${state.session.id.slice(0, 8)})\n`,
+    ),
+  );
 }
 
 /** Fraction of the context window at which auto-compaction kicks in (#1). */

@@ -14,7 +14,7 @@ describe("renderMarkdown block elements", () => {
   });
 
   it("renders a blockquote with a gutter", () => {
-    expect(renderMarkdown("> quoted")).toContain("│ ");
+    expect(renderMarkdown("> quoted")).toContain("▌ ");
     expect(renderMarkdown("> quoted")).toContain("quoted");
   });
 
@@ -142,6 +142,39 @@ describe("GFM tables", () => {
     const out = renderMarkdown(wideTable).split("\n");
     expect(out).toHaveLength(7);
     expect(new Set(out.map((line) => visibleWidth(line))).size).toBe(1);
+  });
+
+  it("keeps borders aligned when mixed CJK cells also contain inline markdown", () => {
+    const mixedTable = [
+      "| 名称 | 说明 |",
+      "|---|---|",
+      "| `Light-Agent` | **中文** mixed English content |",
+      "| MCP | 支持 `stdio` + **tool search** |",
+    ].join("\n");
+    const out = renderMarkdown(mixedTable).split("\n");
+    expect(new Set(out.map((line) => visibleWidth(line))).size).toBe(1);
+  });
+
+  it("splits wide tables into width-safe column chunks on narrow terminals", () => {
+    const desc = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+    try {
+      Object.defineProperty(process.stdout, "columns", {
+        value: 42,
+        configurable: true,
+        writable: true,
+      });
+      const wide = [
+        "| Name | Role | Team | Region | Status |",
+        "|---|---|---|---|---|",
+        "| Light-Agent | CLI | Core | CN | Active |",
+        "| MCP Bridge | Tooling | Platform | US | Beta |",
+      ].join("\n");
+      const out = renderMarkdown(wide).split("\n");
+      expect(out.some((line) => line.includes("table columns"))).toBe(true);
+      expect(out.every((line) => visibleWidth(line) <= 42)).toBe(true);
+    } finally {
+      if (desc) Object.defineProperty(process.stdout, "columns", desc);
+    }
   });
 });
 

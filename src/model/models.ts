@@ -50,7 +50,21 @@ export const fetchModels: FetchModels = async (opts) => {
     if (!resp.ok) {
       return { models: [], error: `HTTP ${resp.status}` };
     }
-    const json = (await resp.json()) as { data?: Array<{ id?: unknown }> };
+    let json: { data?: Array<{ id?: unknown }> };
+    if (typeof resp.text === "function") {
+      const raw = await resp.text();
+      try {
+        json = JSON.parse(raw) as { data?: Array<{ id?: unknown }> };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return {
+          models: [],
+          error: `Invalid model-list JSON: ${raw.trim().slice(0, 120) || message}`,
+        };
+      }
+    } else {
+      json = (await resp.json()) as { data?: Array<{ id?: unknown }> };
+    }
     const models = (json.data ?? [])
       .map((m) => (typeof m.id === "string" ? m.id : ""))
       .filter((id): id is string => id.length > 0);

@@ -103,7 +103,7 @@ function makeCtx(answers: string[] = []): {
     todos: [],
     skillCatalog: [],
     pendingContext: [],
-    pendingContextLabels: [],
+    pendingAttachments: [],
     refreshSkills() {
       this.skillCatalog = [];
     },
@@ -679,12 +679,60 @@ describe("/mcp", () => {
     const reg = buildRegistry();
     const { ctx, state, output } = makeCtx();
     state.config.workdir = root;
-    await reg.dispatch("/mcp", ctx);
+    await reg.dispatch("/mcp list", ctx);
     const out = output();
     expect(out).toContain("MCP servers");
     expect(out).toContain("docs");
     expect(out).toContain("Docs server");
     rmSync(root, { recursive: true, force: true });
+  });
+
+  it("attaches and removes MCP server hints for the next message", async () => {
+    isolated();
+    const root = mkdtempSync(join(tmpdir(), "mcp-"));
+    mkdirSync(join(root, ".agents", "mcp"), { recursive: true });
+    writeFileSync(
+      join(root, ".agents", "mcp", "docs.json"),
+      JSON.stringify({
+        command: "npx",
+        args: ["-y", "@modelcontextprotocol/server-filesystem"],
+        description: "Docs server",
+      }),
+    );
+    const reg = buildRegistry();
+    const { ctx, state } = makeCtx();
+    state.config.workdir = root;
+    await reg.dispatch("/mcp use docs", ctx);
+    expect(state.pendingAttachments.map((item) => `${item.kind}:${item.label}`)).toEqual([
+      "mcp:docs",
+    ]);
+    expect(state.pendingContext).toEqual([
+      '# MCP: docs\n\nUse the MCP server "docs" for this next message when its tools are relevant.\n\nServer notes: Docs server',
+    ]);
+    await reg.dispatch("/mcp remove docs", ctx);
+    expect(state.pendingAttachments).toEqual([]);
+    expect(state.pendingContext).toEqual([]);
+    rmSync(root, { recursive: true, force: true });
+  });
+});
+
+describe("/config search", () => {
+  it("writes global Tavily settings without needing a repo-local .env", async () => {
+    isolated();
+    const reg = buildRegistry();
+    const { ctx } = makeCtx(["tvly-test-key"]);
+    await reg.dispatch("/config search tavily-key", ctx);
+    expect(process.env.TAVILY_API_KEY).toBe("tvly-test-key");
+    await reg.dispatch("/config search backend tavily", ctx);
+    expect(process.env.LIGHT_AGENT_SEARCH_BACKEND).toBe("tavily");
+  });
+
+  it("supports picker-driven search config updates", async () => {
+    isolated();
+    const reg = buildRegistry();
+    const { ctx } = makeCtx(["search", "backend:bing"]);
+    await reg.dispatch("/config", ctx);
+    expect(process.env.LIGHT_AGENT_SEARCH_BACKEND).toBe("bing");
   });
 });
 
@@ -703,7 +751,7 @@ describe("/skill", () => {
     await reg.dispatch("/skill", ctx);
     const out = output();
     expect(out).toBe("");
-    expect(state.pendingContextLabels).toEqual(["review"]);
+    expect(state.pendingAttachments.map((item) => `${item.kind}:${item.label}`)).toEqual(["skill:review"]);
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -720,7 +768,7 @@ describe("/skill", () => {
     state.config.workdir = root;
     await reg.dispatch("/skill review", ctx);
     expect(state.pendingContext).toEqual(["# Skill: review\n\nReview carefully."]);
-    expect(state.pendingContextLabels).toEqual(["review"]);
+    expect(state.pendingAttachments.map((item) => `${item.kind}:${item.label}`)).toEqual(["skill:review"]);
     expect(output()).toBe("");
     rmSync(root, { recursive: true, force: true });
   });
@@ -739,7 +787,7 @@ describe("/skill", () => {
     await reg.dispatch("/skill review", ctx);
     await reg.dispatch("/skill clear", ctx);
     expect(state.pendingContext).toEqual([]);
-    expect(state.pendingContextLabels).toEqual([]);
+    expect(state.pendingAttachments).toEqual([]);
     rmSync(root, { recursive: true, force: true });
   });
 
@@ -762,12 +810,12 @@ describe("/skill", () => {
     await reg.dispatch("/skill review", ctx);
     await reg.dispatch("/skill docs", ctx);
     await reg.dispatch("/skill remove review", ctx);
-    expect(state.pendingContextLabels).toEqual(["docs"]);
+    expect(state.pendingAttachments.map((item) => `${item.kind}:${item.label}`)).toEqual(["skill:docs"]);
     expect(state.pendingContext).toEqual(["# Skill: docs\n\nDocument the change."]);
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("lets the picker remove already attached skills", async () => {
+  it("lets the picker attach a skill directly with no extra command output", async () => {
     isolated();
     const root = mkdtempSync(join(tmpdir(), "skills-"));
     mkdirSync(join(root, ".agents", "skills", "review"), { recursive: true });
@@ -776,12 +824,12 @@ describe("/skill", () => {
       "---\nname: review\ndescription: code review helper\n---\nReview carefully.",
     );
     const reg = buildRegistry();
-    const { ctx, state } = makeCtx(["remove:review"]);
+    const { ctx, state, output } = makeCtx(["review"]);
     state.config.workdir = root;
-    await reg.dispatch("/skill review", ctx);
     await reg.dispatch("/skill", ctx);
-    expect(state.pendingContextLabels).toEqual([]);
-    expect(state.pendingContext).toEqual([]);
+    expect(state.pendingAttachments.map((item) => `${item.kind}:${item.label}`)).toEqual(["skill:review"]);
+    expect(state.pendingContext).toEqual(["# Skill: review\n\nReview carefully."]);
+    expect(output()).toBe("");
     rmSync(root, { recursive: true, force: true });
   });
 

@@ -1,6 +1,6 @@
 import { filterMenuRows, renderMenu, type MenuRow } from "./menu.js";
 import { frameInput, frameInnerWidth, inputBorderTone } from "./frame.js";
-import { visibleWidth, dim, gray, yellow, cyan } from "./theme.js";
+import { visibleWidth, dim, gray, yellow, cyan, bgDark } from "./theme.js";
 import type { EditorMenuItem } from "./lineEditor.js";
 
 type Mode = "edit" | "menu" | "pick" | "secret";
@@ -54,7 +54,7 @@ function plainCollapseRows(prompt: string, lines: string[], mode: Mode): string[
   if (mode === "pick") {
     return [prompt];
   }
-  return lines.map((line, i) => (i === 0 ? prompt : "  ") + line);
+  return lines.map((line, i) => bgDark((i === 0 ? prompt : "  ") + line));
 }
 
 function menuRowsOf(items: EditorMenuItem[]): MenuRow[] {

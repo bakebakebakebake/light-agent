@@ -147,7 +147,7 @@ function renderBlockLine(line: string): string {
   // Blockquote: leading > (optionally repeated).
   const quote = /^\s*>\s?(.*)$/.exec(line);
   if (quote) {
-    return gray("│ ") + gray(renderInline(quote[1] ?? ""));
+    return bold(gray("▌ ")) + italic(gray(renderInline(quote[1] ?? "")));
   }
 
   // Unordered list item: -, *, or + followed by a space.
@@ -265,6 +265,73 @@ function isSeparator(row: string): boolean {
 
 type Align = "left" | "right" | "center";
 
+function tableVisibleWidth(widths: number[]): number {
+  return widths.reduce((sum, width) => sum + width, 0) + widths.length * 3 + 1;
+}
+
+function truncateStyledVisible(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) return "";
+  if (visibleWidth(text) <= maxWidth) return text;
+  if (maxWidth === 1) return "…";
+  let out = "";
+  let width = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === "\x1b") {
+      const match = /^\x1b\[[0-9;]*m/.exec(text.slice(i));
+      if (match) {
+        out += match[0];
+        i += match[0].length - 1;
+        continue;
+      }
+    }
+    const cp = text.codePointAt(i) ?? 0;
+    const ch = String.fromCodePoint(cp);
+    const nextWidth = width + visibleWidth(ch);
+    if (nextWidth > maxWidth - 1) {
+      const needsReset = text.includes("\x1b[");
+      return out + "…" + (needsReset ? "\x1b[0m" : "");
+    }
+    out += ch;
+    width = nextWidth;
+    if (cp > 0xffff) i += 1;
+  }
+  return out;
+}
+
+function shrinkWidthsToFit(widths: number[], maxWidth: number): number[] {
+  const next = [...widths];
+  while (tableVisibleWidth(next) > maxWidth) {
+    let target = -1;
+    for (let i = 0; i < next.length; i++) {
+      if (next[i]! <= 3) continue;
+      if (target === -1 || next[i]! > next[target]!) target = i;
+    }
+    if (target === -1) break;
+    next[target] = (next[target] ?? 4) - 1;
+  }
+  return next;
+}
+
+function chunkColumnRanges(
+  widths: number[],
+  maxWidth: number,
+): Array<{ start: number; end: number }> {
+  const ranges: Array<{ start: number; end: number }> = [];
+  let start = 0;
+  while (start < widths.length) {
+    let end = start + 1;
+    while (end < widths.length) {
+      const test = widths.slice(start, end + 1).map((width) => Math.min(width, 8));
+      if (tableVisibleWidth(test) > maxWidth) break;
+      end += 1;
+    }
+    if (end === start) end += 1;
+    ranges.push({ start, end });
+    start = end;
+  }
+  return ranges;
+}
+
 /**
  * Render buffered GFM table rows into a light box. Falls back to rendering the
  * rows as plain lines when they don't form a valid header+separator table.
@@ -286,42 +353,59 @@ function renderTable(rows: string[]): string {
   const bodyRows = rows.slice(2).map(splitRow);
   const cols = Math.max(header.length, ...bodyRows.map((r) => r.length));
 
+  const renderedHeader = header.map((cell) => bold(renderInline(cell)));
+  const renderedBody = bodyRows.map((row) => row.map((cell) => renderInline(cell)));
+
   const widths: number[] = [];
   for (let c = 0; c < cols; c++) {
-    let w = visibleWidth(header[c] ?? "");
-    for (const r of bodyRows) w = Math.max(w, visibleWidth(r[c] ?? ""));
+    let w = visibleWidth(renderedHeader[c] ?? "");
+    for (const r of renderedBody) w = Math.max(w, visibleWidth(r[c] ?? ""));
     widths[c] = Math.max(3, w);
   }
 
-  const padCell = (text: string, c: number): string => {
-    const w = widths[c] ?? 3;
-    const len = visibleWidth(text);
-    const space = Math.max(0, w - len);
-    const align = aligns[c] ?? "left";
-    if (align === "right") return " ".repeat(space) + text;
+  const maxWidth = Math.max(24, (process.stdout.columns ?? 80) - 2);
+  const ranges = chunkColumnRanges(widths, maxWidth);
+
+  const padCell = (text: string, width: number, align: Align): string => {
+    const clipped = truncateStyledVisible(text, width);
+    const len = visibleWidth(clipped);
+    const space = Math.max(0, width - len);
+    if (align === "right") return " ".repeat(space) + clipped;
     if (align === "center") {
       const l = Math.floor(space / 2);
-      return " ".repeat(l) + text + " ".repeat(space - l);
+      return " ".repeat(l) + clipped + " ".repeat(space - l);
     }
-    return text + " ".repeat(space);
+    return clipped + " ".repeat(space);
   };
 
-  const bar = (l: string, mid: string, r: string): string =>
-    gray(l + widths.map((w) => "─".repeat(w + 2)).join(mid) + r);
-  const line = (cells: string[], styler: (s: string) => string): string =>
-    gray("│ ") +
-    widths
-      .map((_w, c) => styler(padCell(cells[c] ?? "", c)))
-      .join(gray(" │ ")) +
-    gray(" │");
+  const renderChunk = (start: number, end: number): string[] => {
+    const chunkWidths = shrinkWidthsToFit(widths.slice(start, end), maxWidth);
+    const chunkAligns = aligns.slice(start, end);
+    const chunkHeader = renderedHeader.slice(start, end);
+    const chunkBody = renderedBody.map((row) => row.slice(start, end));
+    const bar = (l: string, mid: string, r: string): string =>
+      gray(l + chunkWidths.map((w) => "─".repeat(w + 2)).join(mid) + r);
+    const line = (cells: string[]): string =>
+      gray("│ ") +
+      chunkWidths
+        .map((width, idx) => padCell(cells[idx] ?? "", width, chunkAligns[idx] ?? "left"))
+        .join(gray(" │ ")) +
+      gray(" │");
 
-  const out: string[] = [];
-  out.push(bar("┌", "┬", "┐"));
-  out.push(line(header, (s) => bold(s)));
-  out.push(bar("├", "┼", "┤"));
-  for (const r of bodyRows) out.push(line(r, (s) => renderInline(s)));
-  out.push(bar("└", "┴", "┘"));
-  return out.join("\n");
+    const out: string[] = [];
+    if (ranges.length > 1) {
+      out.push(dim(`table columns ${start + 1}-${end} of ${cols}`));
+    }
+    out.push(bar("┌", "┬", "┐"));
+    out.push(line(chunkHeader));
+    out.push(bar("├", "┼", "┤"));
+    for (const row of chunkBody) out.push(line(row));
+    out.push(bar("└", "┴", "┘"));
+    return out;
+  };
+
+  const renderedChunks = ranges.map((range) => renderChunk(range.start, range.end));
+  return renderedChunks.map((chunk) => chunk.join("\n")).join("\n\n");
 }
 
 /**

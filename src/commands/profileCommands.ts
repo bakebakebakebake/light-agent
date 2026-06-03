@@ -2,6 +2,7 @@ import type { CommandContext, PickItem, SlashCommand } from "./registry.js";
 import { contextWindowFor } from "../model/contextWindow.js";
 import { modelHint, selectModel } from "../model/selection.js";
 import { collectOnboarding } from "../onboarding.js";
+import { globalEnvPath, writeGlobalEnvEntries } from "../config.js";
 import {
   getActiveProfile,
   listProfiles,
@@ -17,12 +18,131 @@ import {
 import { humanTokens } from "../ui/status.js";
 import { bold, cyan, dim, green, red, symbols, yellow } from "../ui/theme.js";
 
+function currentSearchBackend(): string {
+  return process.env.LIGHT_AGENT_SEARCH_BACKEND ?? process.env.HARNESS_SEARCH_BACKEND ?? "auto";
+}
+
+function searchConfigPickerItems(): PickItem[] {
+  const backend = currentSearchBackend();
+  return [
+    {
+      label: "Show search config",
+      value: "show",
+      hint: `${backend} ${symbols.dot} ${process.env.TAVILY_API_KEY ? "Tavily set" : "no Tavily key"}`,
+    },
+    { label: "Backend: auto", value: "backend:auto" },
+    { label: "Backend: tavily", value: "backend:tavily" },
+    { label: "Backend: bing", value: "backend:bing" },
+    { label: "Set Tavily key", value: "tavily-key" },
+    { label: "Clear Tavily key", value: "clear-tavily-key" },
+  ];
+}
+
+async function runSearchConfigAction(
+  ctx: CommandContext,
+  action: string,
+  args: string[],
+): Promise<{}> {
+  if (!action || action === "show") {
+    ctx.out(bold("  Search config"));
+    ctx.out(`  ${dim("env file")} ${globalEnvPath()}`);
+    ctx.out(`  ${dim("backend")} ${currentSearchBackend()}`);
+    ctx.out(
+      `  ${dim("tavily")} ${process.env.TAVILY_API_KEY ? green("configured") : yellow("not set")}`,
+    );
+    ctx.out(dim("  Set backend: /config search backend <auto|tavily|bing>"));
+    ctx.out(dim("  Set key:     /config search tavily-key"));
+    ctx.out(dim("  Clear key:   /config search clear-tavily-key"));
+    return {};
+  }
+  if (action === "backend") {
+    let value = (args[2] ?? "").trim().toLowerCase();
+    if (!value && ctx.pick) {
+      value =
+        (await ctx.pick("  Search backend", [
+          { label: "auto", value: "auto" },
+          { label: "tavily", value: "tavily" },
+          { label: "bing", value: "bing" },
+        ])) ?? "";
+    }
+    if (!["auto", "tavily", "bing"].includes(value)) {
+      ctx.out(dim("  Usage: /config search backend <auto|tavily|bing>"));
+      return {};
+    }
+    const path = writeGlobalEnvEntries({ LIGHT_AGENT_SEARCH_BACKEND: value });
+    process.env.LIGHT_AGENT_SEARCH_BACKEND = value;
+    ctx.out(green(`  Saved search backend "${value}" to ${path}.`));
+    return {};
+  }
+  if (action === "tavily-key") {
+    const key = (await ctx.ask("Tavily API key: ", { secret: true })).trim();
+    if (!key) {
+      ctx.out(yellow("  No key entered."));
+      return {};
+    }
+    const path = writeGlobalEnvEntries({ TAVILY_API_KEY: key });
+    process.env.TAVILY_API_KEY = key;
+    ctx.out(green(`  Saved Tavily key to ${path}.`));
+    return {};
+  }
+  if (action === "clear-tavily-key") {
+    const path = writeGlobalEnvEntries({ TAVILY_API_KEY: "" });
+    delete process.env.TAVILY_API_KEY;
+    ctx.out(green(`  Cleared Tavily key in ${path}.`));
+    return {};
+  }
+  ctx.out(dim("  Usage: /config search"));
+  ctx.out(dim("         /config search backend <auto|tavily|bing>"));
+  ctx.out(dim("         /config search tavily-key"));
+  ctx.out(dim("         /config search clear-tavily-key"));
+  return {};
+}
+
 export const configCommand: SlashCommand = {
   name: "config",
-  description: "Show the active profile's settings",
+  description: "Show profile settings or configure global search env",
   keywords: ["settings", "profile"],
   priority: 40,
-  async run(ctx) {
+  subcommands: ["search"],
+  async run(ctx, args) {
+    const sub = (args[0] ?? "").trim().toLowerCase();
+    if (!sub && ctx.pick) {
+      const choice = await ctx.pick("  Config", [
+        {
+          label: "Runtime config",
+          value: "runtime",
+          hint: `${ctx.state.config.provider} ${symbols.dot} ${ctx.state.config.model}`,
+        },
+        {
+          label: "Search config",
+          value: "search",
+          hint: `${currentSearchBackend()} ${symbols.dot} ${process.env.TAVILY_API_KEY ? "Tavily set" : "no Tavily key"}`,
+        },
+      ]);
+      if (choice === "search") {
+        const action = await ctx.pick("  Search config", searchConfigPickerItems());
+        if (!action) return {};
+        if (action === "show") return runSearchConfigAction(ctx, "show", args);
+        if (action.startsWith("backend:")) {
+          return runSearchConfigAction(ctx, "backend", ["search", "backend", action.split(":")[1] ?? ""]);
+        }
+        return runSearchConfigAction(ctx, action, ["search", action]);
+      }
+      if (!choice || choice !== "runtime") return {};
+    }
+    if (sub === "search") {
+      const action = (args[1] ?? "").trim().toLowerCase();
+      if (!action && ctx.pick) {
+        const picked = await ctx.pick("  Search config", searchConfigPickerItems());
+        if (!picked) return {};
+        if (picked === "show") return runSearchConfigAction(ctx, "show", args);
+        if (picked.startsWith("backend:")) {
+          return runSearchConfigAction(ctx, "backend", ["search", "backend", picked.split(":")[1] ?? ""]);
+        }
+        return runSearchConfigAction(ctx, picked, ["search", picked]);
+      }
+      return runSearchConfigAction(ctx, action, args);
+    }
     const { config, profileName } = ctx.state;
     const ctxWin = contextWindowFor(config.model, config.contextWindow);
     const ctxLabel = config.contextWindow

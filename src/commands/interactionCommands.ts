@@ -1,5 +1,5 @@
 import type { CommandContext, SlashCommand } from "./registry.js";
-import { loadSkills, listSkills, type Skill, skillContextBlock } from "../ext/skills.js";
+import { loadSkills, listSkills, type Skill } from "../ext/skills.js";
 import { loadRepoAgentConfig, saveRepoAgentConfig } from "../ext/repoConfig.js";
 import {
   colorizeDiff,
@@ -13,6 +13,12 @@ import { bold, cyan, dim, green, red, symbols } from "../ui/theme.js";
 import { gitDiff, gitDiffFiles, type GitDiffFile } from "../util/git.js";
 import { isDebugEnabled, logger, setDebugEnabled } from "../util/logger.js";
 import { fetchWebPage, searchWeb, type SearchBias } from "../util/web.js";
+import {
+  clearPendingAttachmentsByKind,
+  pushPendingAttachment,
+  removePendingAttachment,
+  skillAttachment,
+} from "../pendingContext.js";
 
 function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;]*m/g, "");
@@ -268,57 +274,20 @@ function skillItems(skills: Map<string, Skill>): Array<{
 }
 
 function queueSkill(ctx: CommandContext, skill: Skill): void {
-  const block = skillContextBlock(skill);
-  if (!ctx.state.pendingContext.includes(block)) {
-    ctx.state.pendingContext.push(block);
-  }
-  if (!ctx.state.pendingContextLabels.includes(skill.name)) {
-    ctx.state.pendingContextLabels.push(skill.name);
-  }
+  pushPendingAttachment(ctx.state, skillAttachment(skill));
 }
 
 function removeQueuedSkill(ctx: CommandContext, name: string): boolean {
-  const needle = name.trim().toLowerCase();
-  if (!needle) return false;
-  const before = ctx.state.pendingContextLabels.length;
-  ctx.state.pendingContextLabels = ctx.state.pendingContextLabels.filter(
-    (label) => label.toLowerCase() !== needle,
-  );
-  ctx.state.pendingContext = ctx.state.pendingContext.filter(
-    (block) => !block.toLowerCase().startsWith(`# skill: ${needle}\n`),
-  );
-  return ctx.state.pendingContextLabels.length !== before;
+  return removePendingAttachment(ctx.state, "skill", name);
 }
 
 function skillPickerItems(
   enabledSkills: Map<string, Skill>,
-  pending: readonly string[],
 ): Array<{ label: string; value: string; hint?: string; selectable?: boolean; tone?: "dim" }> {
-  const items: Array<{
-    label: string;
-    value: string;
-    hint?: string;
-    selectable?: boolean;
-    tone?: "dim";
-  }> = [];
-  if (pending.length > 0) {
-    items.push({ label: "Attached skills", value: "__attached__", selectable: false, tone: "dim" });
-    for (const name of pending) {
-      items.push({
-        label: name,
-        value: `remove:${name}`,
-        hint: "Remove from the next message",
-      });
-    }
-    items.push({
-      label: "Clear all attached skills",
-      value: "__clear__",
-      hint: "Drop every queued skill",
-    });
-  }
-  items.push({ label: "Available skills", value: "__available__", selectable: false, tone: "dim" });
-  items.push(...skillItems(enabledSkills));
-  return items;
+  return [
+    { label: "Available skills", value: "__available__", selectable: false, tone: "dim" },
+    ...skillItems(enabledSkills),
+  ];
 }
 
 export const skillCommand: SlashCommand = {
@@ -338,8 +307,7 @@ export const skillCommand: SlashCommand = {
 
     const sub = (args[0] ?? "").trim().toLowerCase();
     if (sub === "clear") {
-      ctx.state.pendingContext = [];
-      ctx.state.pendingContextLabels = [];
+      clearPendingAttachmentsByKind(ctx.state, "skill");
       ctx.out(green("  Cleared attached skills."));
       return {};
     }
@@ -400,22 +368,10 @@ export const skillCommand: SlashCommand = {
       }
       if (ctx.pick) {
         const picked = await ctx.pick(
-          "  Manage skills for the next message",
-          skillPickerItems(enabledSkills, ctx.state.pendingContextLabels),
+          "  Choose a skill",
+          skillPickerItems(enabledSkills),
         );
         if (!picked) {
-          return {};
-        }
-        if (picked === "__clear__") {
-          ctx.state.pendingContext = [];
-          ctx.state.pendingContextLabels = [];
-          ctx.out(green("  Cleared attached skills."));
-          return {};
-        }
-        if (picked.startsWith("remove:")) {
-          const target = picked.slice("remove:".length);
-          removeQueuedSkill(ctx, target);
-          ctx.out(green(`  Removed skill "${target}" from the next message.`));
           return {};
         }
         name = picked.toLowerCase();
@@ -448,7 +404,7 @@ export const skillCommand: SlashCommand = {
     logger.debug("skill queued", {
       name: skill.name,
       scope: skill.scope,
-      pending: ctx.state.pendingContextLabels,
+      pending: ctx.state.pendingAttachments,
     });
     ctx.state.seedInput ??= "";
     return {};

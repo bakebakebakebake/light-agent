@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { splitPromptPresentation } from "../src/ui/input.js";
 import { changedRowIndices, wrapTextRows } from "../src/ui/lineEditor.js";
+import { attachmentBadges } from "../src/pendingContext.js";
 
 describe("splitPromptPresentation", () => {
   it("keeps a short single-line prompt inline", () => {
@@ -50,5 +51,18 @@ describe("changedRowIndices", () => {
 
   it("includes cleared trailing rows when the next frame is shorter", () => {
     expect(changedRowIndices(["a", "b", "c"], ["a"])).toEqual([1, 2]);
+  });
+});
+
+describe("attachmentBadges", () => {
+  it("formats queued mcp and skill attachments for the input frame", () => {
+    expect(attachmentBadges([
+      { kind: "mcp", label: "docs", context: "# MCP: docs" },
+      { kind: "skill", label: "review", context: "# Skill: review" },
+      { kind: "skill", label: "docs", context: "# Skill: docs" },
+    ])).toEqual([
+      "mcp: docs",
+      "skills: review, docs",
+    ]);
   });
 });

@@ -1,6 +1,6 @@
 import { stdout } from "node:process";
 import type { Key, KeySource } from "./keys.js";
-import { dim } from "./theme.js";
+import { bgDark, bold, cyan, dim } from "./theme.js";
 import {
   buildHintView,
   buildRenderView,
@@ -76,6 +76,10 @@ export interface EditorOptions {
   attachSkill?: (skillName: string) => void;
   /** Called when backspacing an empty draft should drop the last attached skill. */
   detachLastSkill?: () => boolean;
+  /** Current next-turn attachments grouped by kind for inline navigation. */
+  attachments?: () => { skills: string[]; mcps: string[] };
+  /** Remove one attached item by kind + label. */
+  detachAttachment?: (kind: "skill" | "mcp", label: string) => boolean;
   /**
    * Fixed picker list. When set, the editor runs in "pick" mode: arrows select,
    * Enter resolves the chosen value, Esc/Ctrl-C resolves null. No free typing.
@@ -115,6 +119,13 @@ export function runEditor(opts: EditorOptions): Promise<EditorResult> {
 type Mode = "edit" | "menu" | "pick" | "secret";
 export { buildHintView, buildRenderView, changedRowIndices, shouldFullRedraw, wrapTextRows };
 
+type AttachmentKind = "skill" | "mcp";
+
+interface AttachmentFocus {
+  kind: AttachmentKind;
+  index: number;
+}
+
 class Editor {
   private lines: string[] = [""];
   private row = 0;
@@ -137,6 +148,7 @@ class Editor {
   private lastCtrlC = 0;
   /** Timestamp of the first Esc press in a slash-command context. */
   private lastEsc = 0;
+  private attachmentFocus: AttachmentFocus | null = null;
   private pickItemsBase: EditorMenuItem[] = [];
   private pickQuery = "";
   private readonly history: string[];
@@ -308,6 +320,11 @@ class Editor {
    */
   private onEscape(): void {
     if (this.mode === "pick") return this.finish({ kind: "cancel" });
+    if (this.attachmentFocus) {
+      this.clearAttachmentFocus();
+      this.lastEsc = 0;
+      return this.draw();
+    }
 
     const now = Date.now();
     const empty = this.bufferText() === "";
@@ -332,7 +349,100 @@ class Editor {
     return this.lines.join("\n");
   }
 
+  private attachmentGroups(): { skills: string[]; mcps: string[] } {
+    return this.opts.attachments?.() ?? { skills: [], mcps: [] };
+  }
+
+  private clearAttachmentFocus(): void {
+    this.attachmentFocus = null;
+  }
+
+  private attachmentLabels(kind: AttachmentKind): string[] {
+    const groups = this.attachmentGroups();
+    return kind === "skill" ? groups.skills : groups.mcps;
+  }
+
+  private tryEnterAttachmentFocus(): boolean {
+    if (this.mode === "menu" || this.mode === "pick" || this.mode === "secret") return false;
+    const { skills, mcps } = this.attachmentGroups();
+    if (skills.length > 0) {
+      this.attachmentFocus = { kind: "skill", index: skills.length - 1 };
+      return true;
+    }
+    if (mcps.length > 0) {
+      this.attachmentFocus = { kind: "mcp", index: mcps.length - 1 };
+      return true;
+    }
+    return false;
+  }
+
+  private moveAttachmentFocusHorizontal(dir: -1 | 1): boolean {
+    if (!this.attachmentFocus) return false;
+    const labels = this.attachmentLabels(this.attachmentFocus.kind);
+    if (labels.length <= 1) return true;
+    this.attachmentFocus = {
+      ...this.attachmentFocus,
+      index: Math.max(0, Math.min(labels.length - 1, this.attachmentFocus.index + dir)),
+    };
+    return true;
+  }
+
+  private moveAttachmentFocusVertical(dir: -1 | 1): boolean {
+    if (!this.attachmentFocus) return false;
+    const { skills, mcps } = this.attachmentGroups();
+    if (dir < 0) {
+      if (this.attachmentFocus.kind === "skill" && mcps.length > 0) {
+        this.attachmentFocus = { kind: "mcp", index: Math.min(this.attachmentFocus.index, mcps.length - 1) };
+        return true;
+      }
+      this.clearAttachmentFocus();
+      return false;
+    }
+    if (this.attachmentFocus.kind === "mcp" && skills.length > 0) {
+      this.attachmentFocus = { kind: "skill", index: Math.min(this.attachmentFocus.index, skills.length - 1) };
+      return true;
+    }
+    this.clearAttachmentFocus();
+    return true;
+  }
+
+  private removeFocusedAttachment(): boolean {
+    if (!this.attachmentFocus || !this.opts.detachAttachment) return false;
+    const labels = this.attachmentLabels(this.attachmentFocus.kind);
+    const label = labels[this.attachmentFocus.index];
+    if (!label) return false;
+    if (!this.opts.detachAttachment(this.attachmentFocus.kind, label)) return false;
+    const nextLabels = this.attachmentLabels(this.attachmentFocus.kind);
+    if (nextLabels.length > 0) {
+      this.attachmentFocus = {
+        kind: this.attachmentFocus.kind,
+        index: Math.min(this.attachmentFocus.index, nextLabels.length - 1),
+      };
+      return true;
+    }
+    const otherKind: AttachmentKind = this.attachmentFocus.kind === "skill" ? "mcp" : "skill";
+    const otherLabels = this.attachmentLabels(otherKind);
+    this.attachmentFocus = otherLabels.length > 0
+      ? { kind: otherKind, index: Math.min(this.attachmentFocus.index, otherLabels.length - 1) }
+      : null;
+    return true;
+  }
+
+  private renderFocusedBadgeRows(badges: string[]): string[] {
+    if (!this.attachmentFocus) return badges;
+    const targetPrefix = this.attachmentFocus.kind === "skill" ? "skills: " : "mcp: ";
+    return badges.map((badge) => {
+      if (!badge.startsWith(targetPrefix)) return badge;
+      const labels = this.attachmentLabels(this.attachmentFocus!.kind);
+      const pieces = labels.map((label, index) =>
+        index === this.attachmentFocus!.index ? bgDark(bold(cyan(label))) : label,
+      );
+      return `${targetPrefix}${pieces.join(", ")}`;
+    });
+  }
+
   private insertText(str: string): void {
+    this.clearAttachmentFocus();
     // Split a multi-line paste into the buffer at the cursor.
     const parts = str.split(/\r\n|\r|\n/);
     const line = this.lines[this.row] ?? "";
@@ -353,6 +463,13 @@ class Editor {
   }
 
   private onBackspace(): void {
+    if (this.attachmentFocus) {
+      if (this.removeFocusedAttachment()) {
+        this.closeMenu();
+        return this.draw();
+      }
+      return;
+    }
     if (this.bufferText() === "") {
       if (this.opts.detachLastSkill?.()) {
         this.closeMenu();
@@ -377,6 +494,7 @@ class Editor {
   }
 
   private onDelete(): void {
+    if (this.attachmentFocus) return;
     const line = this.lines[this.row] ?? "";
     if (this.col < line.length) {
       this.lines[this.row] = line.slice(0, this.col) + line.slice(this.col + 1);
@@ -391,6 +509,10 @@ class Editor {
   // --- enter / newline (B4) ---
 
   private onEnter(key: Key): void {
+    if (this.attachmentFocus) {
+      this.clearAttachmentFocus();
+      return this.draw();
+    }
     if (this.mode === "menu") {
       const item = this.menuItems[this.menuSel];
       if (this.menuKind === "command" && item && item.selectable !== false) {
@@ -420,6 +542,7 @@ class Editor {
   // --- cursor movement ---
 
   private moveLeft(): void {
+    if (this.moveAttachmentFocusHorizontal(-1)) return this.draw();
     if (this.col > 0) this.col -= 1;
     else if (this.row > 0) {
       this.row -= 1;
@@ -430,6 +553,7 @@ class Editor {
   }
 
   private moveRight(): void {
+    if (this.moveAttachmentFocusHorizontal(1)) return this.draw();
     const line = this.lines[this.row] ?? "";
     if (this.col < line.length) this.col += 1;
     else if (this.row < this.lines.length - 1) {
@@ -447,18 +571,28 @@ class Editor {
       this.moveMenuSelection(-1);
       return this.draw();
     }
+    if (this.attachmentFocus) {
+      const stayedInAttachment = this.moveAttachmentFocusVertical(-1);
+      if (!stayedInAttachment) return this.recallHistory(1);
+      return this.draw();
+    }
     if (this.row > 0) {
       this.row -= 1;
       this.col = Math.min(this.col, (this.lines[this.row] ?? "").length);
       this.refreshMenu();
       return this.draw();
     }
+    if (this.tryEnterAttachmentFocus()) return this.draw();
     this.recallHistory(1);
   }
 
   private onDown(): void {
     if (this.mode === "menu" || this.mode === "pick") {
       this.moveMenuSelection(1);
+      return this.draw();
+    }
+    if (this.attachmentFocus) {
+      this.moveAttachmentFocusVertical(1);
       return this.draw();
     }
     if (this.row < this.lines.length - 1) {
@@ -473,6 +607,7 @@ class Editor {
   /** Move through history: dir=+1 older, dir=-1 newer. */
   private recallHistory(dir: number): void {
     if (this.history.length === 0 || this.mode === "secret") return;
+    this.clearAttachmentFocus();
     const next = this.histIdx + dir;
     if (next < -1 || next >= this.history.length) return;
     this.histIdx = next;
@@ -487,6 +622,7 @@ class Editor {
   // --- emacs chords ---
 
   private onCtrlChord(key: Key): void {
+    this.clearAttachmentFocus();
     const line = this.lines[this.row] ?? "";
     switch (key.name) {
       case "a": // start of line
@@ -531,6 +667,7 @@ class Editor {
    * the `/…` command menu when the whole buffer is a slash line. */
   private refreshMenu(): void {
     if (this.mode === "pick" || this.mode === "secret") return;
+    if (this.attachmentFocus) return;
 
     // 1) `@` file mention: look at the token ending at the cursor on this line.
     if (this.opts.fileMenu) {
@@ -711,12 +848,13 @@ class Editor {
   }
 
   private buildCurrentView(): RenderView {
-    const badges =
+    const badges = this.renderFocusedBadgeRows(
       this.mode === "pick" || this.mode === "secret"
         ? []
         : typeof this.opts.badges === "function"
           ? this.opts.badges()
-          : this.opts.badges ?? [];
+          : this.opts.badges ?? [],
+    );
     return buildRenderView({
       prompt: this.opts.prompt,
       lines: this.lines,

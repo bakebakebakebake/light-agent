@@ -1,5 +1,6 @@
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, resolve } from "node:path";
 import {
   loadStore,
   getActiveProfile,
@@ -58,12 +59,31 @@ export function parsePositiveInt(
   return Number.isInteger(n) && n > 0 ? n : undefined;
 }
 
+function preferredGlobalHome(): string {
+  if (process.env.LIGHT_AGENT_HOME) return process.env.LIGHT_AGENT_HOME;
+  if (process.env.HARNESS_HOME) return process.env.HARNESS_HOME;
+  const preferred = resolve(homedir(), ".light-agent");
+  const legacy = resolve(homedir(), ".harness-agent");
+  if (existsSync(preferred)) return preferred;
+  if (existsSync(legacy)) return legacy;
+  return preferred;
+}
+
+export function globalEnvPath(): string {
+  return resolve(preferredGlobalHome(), "env");
+}
+
 /**
  * Minimal .env loader — keeps us dependency-free.
- * Only sets keys that aren't already present in process.env.
+ * Shell env stays highest priority. Global user env loads first, then the
+ * project-local `.env` can override values that only came from that global
+ * file.
  */
-function loadDotEnv(cwd: string): void {
-  const envPath = resolve(cwd, ".env");
+function applyDotEnvFile(
+  envPath: string,
+  protectedKeys: Set<string>,
+  allowOverrideLoaded: boolean,
+): void {
   if (!existsSync(envPath)) return;
   const raw = readFileSync(envPath, "utf8");
   for (const line of raw.split("\n")) {
@@ -80,10 +100,16 @@ function loadDotEnv(cwd: string): void {
     ) {
       value = value.slice(1, -1);
     }
-    if (key && !(key in process.env)) {
-      process.env[key] = value;
-    }
+    if (!key || protectedKeys.has(key)) continue;
+    if (!allowOverrideLoaded && key in process.env) continue;
+    process.env[key] = value;
   }
+}
+
+function loadDotEnv(cwd: string): void {
+  const protectedKeys = new Set(Object.keys(process.env));
+  applyDotEnvFile(globalEnvPath(), protectedKeys, false);
+  applyDotEnvFile(resolve(cwd, ".env"), protectedKeys, true);
 }
 
 function envValue(name: string): string | undefined {
@@ -205,7 +231,18 @@ export function writeEnvEntries(
   cwd: string,
   entries: Record<string, string>,
 ): string {
-  const envPath = resolve(cwd, ".env");
+  return writeEnvEntriesToPath(resolve(cwd, ".env"), entries);
+}
+
+export function writeGlobalEnvEntries(entries: Record<string, string>): string {
+  return writeEnvEntriesToPath(globalEnvPath(), entries);
+}
+
+function writeEnvEntriesToPath(
+  envPath: string,
+  entries: Record<string, string>,
+): string {
+  mkdirSync(dirname(envPath), { recursive: true });
   const existing = existsSync(envPath) ? readFileSync(envPath, "utf8") : "";
   const lines = existing.length ? existing.split("\n") : [];
   const remaining = { ...entries };

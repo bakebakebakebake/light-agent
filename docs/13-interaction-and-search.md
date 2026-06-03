@@ -31,6 +31,16 @@
   - 输入框里会显示 `skills: ...`
   - 你可以继续写正文
 - `#` 内联选择和 `/skill` 选择现在走同一条挂载链路,所以 badge 会立刻刷新。
+- 当输入框为空时,按 `Backspace` 会按加入顺序的反向逐个移除已挂载项。
+  当前这套回退同时覆盖:
+  - skill
+  - `/mcp use <server>` 挂上的 MCP server hint
+- 如果输入框里已经写了很多正文:
+  - 按 `↑` 会先进入已挂载项区域,不会立刻跳历史
+  - 会先落在 `skills:` 行,再往上是 `mcp:` 行
+  - `←` / `→` 可在当前行的已挂载项之间切换
+  - `Backspace` 会移除当前高亮的那一项
+  - `↓` 会按相反方向回到正文输入区
 - 这批 skill 只作用于**下一条消息**。发出去后会自动消费掉。
 
 `/skill` 也仍然可用:
@@ -45,9 +55,10 @@
 /skill clear
 ```
 
-- `/skill` picker 现在也会显示当前已挂载的 skill:
-  - 直接选某个已挂载 skill,就是把它从下一条消息里移除
-  - 也可以选 `Clear all attached skills`
+- `/skill` 无参会直接打开“可用 skills”选择器:
+  - 选中后立刻挂到下一条消息
+  - 不再先进入一个 `Manage skills...` 的中间层
+  - 已挂载 skill 的移除更适合直接在输入框里用附件导航完成
 
 当前 skill 会显示这些元数据:
 
@@ -113,6 +124,30 @@ repo 级控制文件:
 4. 输出标题、来源、backend、URL、摘要、日期
 5. 在 TTY 模式下可以继续选一个结果,直接抓页面正文
 
+如果你主要使用 npm 安装版,更适合直接配全局搜索设置,而不是每个项目都写
+一份 `.env`。
+
+当前优先级:
+
+1. shell env
+2. `<workdir>/.env`
+3. `~/.light-agent/env`
+
+可直接通过命令配置:
+
+```text
+/config
+/config search
+/config search backend auto
+/config search backend tavily
+/config search tavily-key
+/config search clear-tavily-key
+```
+
+- `/config` 和 `/config search` 在 TTY 模式下都支持 picker:
+  - 可以直接选 runtime config 或 search config
+  - search config 里可以直接选 backend / set key / clear key
+
 补充一点:
 
 - DeepSeek V4 走官方 thinking 语义时,CLI 的 `thinking high` 会映射到
@@ -140,6 +175,10 @@ repo 级控制文件:
 - `connected` / `idle`
 - 当前已加载 tool 数
 - command / args / scope / description
+- `/mcp` 无参时会进入 picker,可以直接把某个 server 挂到**下一条消息**
+- `/mcp use <server>` 也可以显式挂载
+- 挂载后输入框会显示 `mcp: ...`
+- 和 skill 一样,发出去后会自动消费掉
 
 `/protect` 用来保护模型动作:
 

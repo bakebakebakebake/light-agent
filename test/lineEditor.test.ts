@@ -340,6 +340,36 @@ describe("lineEditor inline skill badges", () => {
     expect(badges).toEqual([]);
     expect(await p).toEqual({ kind: "submit", value: "hello" });
   });
+
+  it("lets arrow navigation focus attached skills and MCP items before history recall", async () => {
+    const keys = new FakeKeys();
+    const removed: string[] = [];
+    const attachments = {
+      skills: ["review", "docs"],
+      mcps: ["github"],
+    };
+    const p = run(keys, {
+      attachments: () => attachments,
+      detachAttachment: (kind: "skill" | "mcp", label: string) => {
+        const list = kind === "skill" ? attachments.skills : attachments.mcps;
+        const idx = list.indexOf(label);
+        if (idx === -1) return false;
+        list.splice(idx, 1);
+        removed.push(`${kind}:${label}`);
+        return true;
+      },
+      history: ["older question"],
+    });
+    keys.send("up");
+    keys.send("left");
+    keys.send("backspace");
+    keys.send("up");
+    keys.send("backspace");
+    keys.send("up");
+    keys.send("return");
+    expect(removed).toEqual(["skill:review", "mcp:github"]);
+    expect(await p).toEqual({ kind: "submit", value: "older question" });
+  });
 });
 
 describe("lineEditor render views", () => {

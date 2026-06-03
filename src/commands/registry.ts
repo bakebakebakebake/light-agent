@@ -7,6 +7,7 @@ import type { TodoItem } from "../todos.js";
 import { fuzzyScore } from "../ui/menu.js";
 import { logger } from "../util/logger.js";
 import type { McpServerStatus } from "../mcp/types.js";
+import type { PendingAttachment } from "../pendingContext.js";
 
 /**
  * Slash-command system (docs/08).
@@ -48,8 +49,8 @@ export interface SessionState {
    * disclosure). Treated as untrusted data, same as any tool output.
    */
   pendingContext: string[];
-  /** Human-visible labels for next-turn context, e.g. selected skills. */
-  pendingContextLabels: string[];
+  /** Ordered next-turn attachments, e.g. selected skills or MCP server hints. */
+  pendingAttachments: PendingAttachment[];
   /**
    * A prompt queued by a custom command to run as the next turn's input (B2).
    * cli.ts drains this after a command dispatch and feeds it to the agent loop.
