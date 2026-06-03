@@ -1,6 +1,6 @@
 {
   "name": "light-agent-cli",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "private": false,
   "type": "module",
   "description": "Light-Agent, a local-first coding agent CLI for terminal workflows",
@@ -21,7 +21,7 @@
     "mcp"
   ],
   "bin": {
-    "light-agent": "./dist/cli.js"
+    "light-agent": "dist/cli.js"
   },
   "files": [
     "dist",
@@ -35,7 +35,7 @@
   },
   "scripts": {
     "dev": "tsx src/cli.ts",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && chmod +x dist/cli.js",
     "prepack": "npm run build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
