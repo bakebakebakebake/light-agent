@@ -1,10 +1,10 @@
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import {
   loadStore,
   getActiveProfile,
   profileToConfig,
+  storeDir,
 } from "./profiles.js";
 import type { ThinkingDepth } from "./model/types.js";
 import type { VisionMode } from "./util/images.js";
@@ -71,18 +71,8 @@ export function parsePositiveInt(
   return Number.isInteger(n) && n > 0 ? n : undefined;
 }
 
-function preferredGlobalHome(): string {
-  if (process.env.LIGHT_AGENT_HOME) return process.env.LIGHT_AGENT_HOME;
-  if (process.env.HARNESS_HOME) return process.env.HARNESS_HOME;
-  const preferred = resolve(homedir(), ".light-agent");
-  const legacy = resolve(homedir(), ".harness-agent");
-  if (existsSync(preferred)) return preferred;
-  if (existsSync(legacy)) return legacy;
-  return preferred;
-}
-
 export function globalEnvPath(): string {
-  return resolve(preferredGlobalHome(), "env");
+  return resolve(storeDir(), "env");
 }
 
 /**
@@ -118,7 +108,7 @@ function applyDotEnvFile(
   }
 }
 
-function loadDotEnv(cwd: string): void {
+export function loadRuntimeEnv(cwd: string): void {
   const protectedKeys = new Set(Object.keys(process.env));
   applyDotEnvFile(globalEnvPath(), protectedKeys, false);
   applyDotEnvFile(resolve(cwd, ".env"), protectedKeys, true);
@@ -178,7 +168,7 @@ export const DEFAULT_ANTHROPIC_MODEL = DEFAULT_MODEL;
 export function isConfigured(cwd: string = process.cwd()): boolean {
   if (resolveActiveProfileName()) return true;
 
-  loadDotEnv(cwd);
+  loadRuntimeEnv(cwd);
   const provider =
     (envValue("PROVIDER") ?? "anthropic").toLowerCase() === "openai"
       ? "openai"
@@ -216,6 +206,7 @@ function resolveActiveProfileName(): string | null {
  * which the CLI turns into the onboarding flow.
  */
 export function resolveConfig(cwd: string = process.cwd()): Config | null {
+  loadRuntimeEnv(cwd);
   const name = resolveActiveProfileName();
   if (name) {
     const store = loadStore();
@@ -306,7 +297,7 @@ function writeEnvEntriesToPath(
  * Throws a clear error if the needed key is missing.
  */
 export function loadConfig(cwd: string = process.cwd()): Config {
-  loadDotEnv(cwd);
+  loadRuntimeEnv(cwd);
 
   const provider =
     (envValue("PROVIDER") ?? "anthropic").toLowerCase() === "openai"

@@ -298,33 +298,45 @@ function tableVisibleWidth(widths: number[]): number {
   return widths.reduce((sum, width) => sum + width, 0) + widths.length * 3 + 1;
 }
 
-function truncateStyledVisible(text: string, maxWidth: number): string {
-  if (maxWidth <= 0) return "";
-  if (visibleWidth(text) <= maxWidth) return text;
-  if (maxWidth === 1) return "…";
-  let out = "";
-  let width = 0;
+function wrapStyledVisible(text: string, maxWidth: number): string[] {
+  if (maxWidth <= 0) return [""];
+  if (text === "") return [""];
+  if (visibleWidth(text) <= maxWidth) return [text];
+
+  const rows: string[] = [];
+  let current = "";
+  let currentWidth = 0;
+  let active = "";
+
   for (let i = 0; i < text.length; i++) {
     if (text[i] === "\x1b") {
       const match = /^\x1b\[[0-9;]*m/.exec(text.slice(i));
       if (match) {
-        out += match[0];
-        i += match[0].length - 1;
+        const seq = match[0];
+        current += seq;
+        if (seq === "\x1b[0m") active = "";
+        else active += seq;
+        i += seq.length - 1;
         continue;
       }
     }
+
     const cp = text.codePointAt(i) ?? 0;
     const ch = String.fromCodePoint(cp);
-    const nextWidth = width + visibleWidth(ch);
-    if (nextWidth > maxWidth - 1) {
-      const needsReset = text.includes("\x1b[");
-      return out + "…" + (needsReset ? "\x1b[0m" : "");
+    const chWidth = visibleWidth(ch);
+    if (currentWidth > 0 && currentWidth + chWidth > maxWidth) {
+      rows.push(current + (active ? "\x1b[0m" : ""));
+      current = active + ch;
+      currentWidth = chWidth;
+    } else {
+      current += ch;
+      currentWidth += chWidth;
     }
-    out += ch;
-    width = nextWidth;
     if (cp > 0xffff) i += 1;
   }
-  return out;
+
+  if (current || rows.length === 0) rows.push(current);
+  return rows;
 }
 
 function shrinkWidthsToFit(widths: number[], maxWidth: number): number[] {
@@ -396,15 +408,14 @@ function renderTable(rows: string[]): string {
   const ranges = chunkColumnRanges(widths, maxWidth);
 
   const padCell = (text: string, width: number, align: Align): string => {
-    const clipped = truncateStyledVisible(text, width);
-    const len = visibleWidth(clipped);
+    const len = visibleWidth(text);
     const space = Math.max(0, width - len);
-    if (align === "right") return " ".repeat(space) + clipped;
+    if (align === "right") return " ".repeat(space) + text;
     if (align === "center") {
       const l = Math.floor(space / 2);
-      return " ".repeat(l) + clipped + " ".repeat(space - l);
+      return " ".repeat(l) + text + " ".repeat(space - l);
     }
-    return clipped + " ".repeat(space);
+    return text + " ".repeat(space);
   };
 
   const renderChunk = (start: number, end: number): string[] => {
@@ -414,21 +425,37 @@ function renderTable(rows: string[]): string {
     const chunkBody = renderedBody.map((row) => row.slice(start, end));
     const bar = (l: string, mid: string, r: string): string =>
       gray(l + chunkWidths.map((w) => "─".repeat(w + 2)).join(mid) + r);
-    const line = (cells: string[]): string =>
-      gray("│ ") +
-      chunkWidths
-        .map((width, idx) => padCell(cells[idx] ?? "", width, chunkAligns[idx] ?? "left"))
-        .join(gray(" │ ")) +
-      gray(" │");
+    const renderRow = (cells: string[]): string[] => {
+      const wrapped = chunkWidths.map((width, idx) =>
+        wrapStyledVisible(cells[idx] ?? "", width).map((part) =>
+          padCell(part, width, chunkAligns[idx] ?? "left"),
+        ),
+      );
+      const height = Math.max(1, ...wrapped.map((parts) => parts.length));
+      const rows: string[] = [];
+      for (let lineIndex = 0; lineIndex < height; lineIndex++) {
+        rows.push(
+          gray("│ ") +
+            chunkWidths
+              .map(
+                (width, idx) =>
+                  wrapped[idx]?.[lineIndex] ?? " ".repeat(width),
+              )
+              .join(gray(" │ ")) +
+            gray(" │"),
+        );
+      }
+      return rows;
+    };
 
     const out: string[] = [];
     if (ranges.length > 1) {
       out.push(dim(`table columns ${start + 1}-${end} of ${cols}`));
     }
     out.push(bar("┌", "┬", "┐"));
-    out.push(line(chunkHeader));
+    out.push(...renderRow(chunkHeader));
     out.push(bar("├", "┼", "┤"));
-    for (const row of chunkBody) out.push(line(row));
+    for (const row of chunkBody) out.push(...renderRow(row));
     out.push(bar("└", "┴", "┘"));
     return out;
   };

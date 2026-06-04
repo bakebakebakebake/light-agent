@@ -167,6 +167,7 @@ images: a.png, b.png
 1. shell env
 2. `<workdir>/.env`
 3. `~/.light-agent/env`
+   - legacy `~/.harness-agent/env` 也会被读取,并在后续写入时迁到 `.light-agent`
 
 可直接通过命令配置:
 

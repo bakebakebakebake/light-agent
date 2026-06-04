@@ -1,10 +1,11 @@
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync, statSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir, platform } from "node:os";
 import { join } from "node:path";
 import {
   loadStore,
   saveStore,
+  storeDir,
   storePath,
   setActive,
   upsertProfile,
@@ -24,10 +25,13 @@ afterEach(() => {
     if (!(k in SAVED)) delete process.env[k];
   }
   Object.assign(process.env, SAVED);
+  delete process.env.LIGHT_AGENT_HOME;
   delete process.env.HARNESS_HOME;
   delete process.env.HARNESS_PROFILE;
   delete process.env.HARNESS_PROVIDER;
   delete process.env.HARNESS_MODEL;
+  delete process.env.LIGHT_AGENT_SEARCH_BACKEND;
+  delete process.env.TAVILY_API_KEY;
   delete process.env.ANTHROPIC_API_KEY;
   delete process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_BASE_URL;
@@ -91,6 +95,30 @@ describe("store load/save", () => {
     const store = loadStore();
     expect(store.activeProfile).toBeNull();
     rmSync(home, { recursive: true, force: true });
+  });
+
+  it("migrates a legacy .harness-agent home to .light-agent", () => {
+    const home = mkdtempSync(join(tmpdir(), "hh-home-"));
+    process.env.HOME = home;
+    delete process.env.HARNESS_HOME;
+    delete process.env.LIGHT_AGENT_HOME;
+
+    const legacyDir = join(home, ".harness-agent");
+    mkdirSync(legacyDir, { recursive: true });
+    writeFileSync(
+      join(legacyDir, "config.json"),
+      JSON.stringify({
+        activeProfile: "claude",
+        profiles: { claude: anthropic },
+      }),
+      "utf8",
+    );
+
+    const resolved = storeDir();
+    expect(resolved).toBe(join(home, ".light-agent"));
+    expect(existsSync(join(home, ".light-agent", "config.json"))).toBe(true);
+    expect(existsSync(legacyDir)).toBe(false);
+    expect(loadStore().activeProfile).toBe("claude");
   });
 });
 
@@ -178,6 +206,23 @@ describe("resolveConfig precedence", () => {
     process.env.HARNESS_PROFILE = "deepseek";
     const cfg = resolveConfig("/tmp/x");
     expect(cfg?.model).toBe("deepseek-chat");
+  });
+
+  it("loads legacy global env entries even when the active profile path wins", () => {
+    const home = isolated();
+    const store = loadStore();
+    upsertProfile(store, "claude", anthropic);
+    saveStore(store);
+    writeFileSync(
+      join(home, "env"),
+      "TAVILY_API_KEY=tvly-test-key\nLIGHT_AGENT_SEARCH_BACKEND=tavily\n",
+      "utf8",
+    );
+
+    const cfg = resolveConfig("/tmp/x");
+    expect(cfg?.provider).toBe("anthropic");
+    expect(process.env.TAVILY_API_KEY).toBe("tvly-test-key");
+    expect(process.env.LIGHT_AGENT_SEARCH_BACKEND).toBe("tavily");
   });
 
   it("falls back to env when the store is empty", () => {

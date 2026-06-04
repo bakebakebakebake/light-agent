@@ -144,8 +144,9 @@ Useful commands inside the app:
   easy to verify.
 - If you mainly use the npm-installed CLI, you do not need a repo-local `.env`
   for search config. Use `/config search` to store `TAVILY_API_KEY` and
-  `LIGHT_AGENT_SEARCH_BACKEND` into the global env file under
-  `~/.light-agent/env`.
+  `LIGHT_AGENT_SEARCH_BACKEND` into the global env file. On fresh installs this
+  is usually `~/.light-agent/env`. Existing `~/.harness-agent` installs are now
+  treated as legacy and will migrate forward to `.light-agent`.
 - `/config` and `/config search` both support picker flows in TTY mode, so you
   can choose search backend / key actions without memorizing every subcommand.
 - `/model test` runs a quick smoke test against the current OpenAI/Anthropic
@@ -225,6 +226,7 @@ For web search, Light-Agent checks config in this order:
 1. shell env
 2. project env file: `<workdir>/.env`
 3. global env file: `~/.light-agent/env`
+   legacy `~/.harness-agent/env` is still read and migrated forward
 
 Useful commands:
 
@@ -280,7 +282,9 @@ GUI commands:
 - `/gui apps`
 - `/gui doctor`
 
-The scheduler stores jobs, logs, and pid state under `~/.light-agent/scheduler/`.
+The scheduler stores jobs, logs, and pid state under the active global home,
+which is now `~/.light-agent/scheduler/`. Legacy `~/.harness-agent/` data is
+read and migrated forward.
 Each job also reads repo-local scheduler policy from `.agents/light-agent.json`,
 and `/schedule add`, `/schedule show`, and `/schedule status` surface the
 effective permissions and runner settings.

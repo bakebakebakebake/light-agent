@@ -1,9 +1,12 @@
 import {
+  cpSync,
   readFileSync,
   writeFileSync,
   existsSync,
   mkdirSync,
   chmodSync,
+  renameSync,
+  rmSync,
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -84,7 +87,20 @@ export function storeDir(): string {
   const preferred = join(homedir(), STORE_DIR_NAME);
   const legacy = join(homedir(), LEGACY_STORE_DIR_NAME);
   if (existsSync(preferred)) return preferred;
-  if (existsSync(legacy)) return legacy;
+  if (existsSync(legacy)) {
+    try {
+      renameSync(legacy, preferred);
+      return preferred;
+    } catch {
+      try {
+        cpSync(legacy, preferred, { recursive: true });
+        rmSync(legacy, { recursive: true, force: true });
+        return preferred;
+      } catch {
+        return legacy;
+      }
+    }
+  }
   return preferred;
 }
 

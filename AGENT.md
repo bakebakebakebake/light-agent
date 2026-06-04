@@ -51,7 +51,7 @@ npm run test:watch     # vitest 监视模式
 cli.ts                 # 交互式 REPL 主入口:读行→命令/shell/turn→渲染
 config.ts              # Config 解析:.env 加载、provider 选择、thinking/ctx 覆盖
 onboarding.ts          # 首次运行向导(无凭证时引导配置,保存为 profile)
-profiles.ts            # 全局 profile 存储(~/.light-agent/config.json)
+profiles.ts            # 全局 profile 存储(~/.light-agent/config.json, legacy ~/.harness-agent 自动迁移)
 sessions.ts            # 会话存档/恢复(~/.light-agent/sessions/<id>.json)
 prompt.ts              # system prompt 组装
 memory/                # 原生记忆系统
@@ -153,7 +153,7 @@ util/                  # git.ts(分支/缓存/diff)、shell.ts、web.ts、images
   (单次切换 profile)、`LIGHT_AGENT_HOME`(覆盖存储根目录)。
   兼容保留旧的 `HARNESS_*` 变量作为 fallback。
 
-### 持久化位置(默认 `~/.light-agent/`,可被 `LIGHT_AGENT_HOME` 覆盖)
+### 持久化位置(默认 `~/.light-agent/`,可被 `LIGHT_AGENT_HOME` 覆盖; legacy `~/.harness-agent/` 自动迁移)
 - `config.json` — 全局多 profile 存储(`/profile`、`/profiles` 命令管理)。
 - `sessions/<id>.json` — 每个会话一份存档(`/resume`、`/rewind` 用)。
 - `memory/user/*.md` — 用户级长期记忆卡。

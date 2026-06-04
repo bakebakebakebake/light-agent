@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { resolveConfig, type Config } from "../config.js";
+import { loadRuntimeEnv, resolveConfig, type Config } from "../config.js";
 import { loadStore, profileToConfig } from "../profiles.js";
 import { createProvider } from "../model/index.js";
 import { defaultRegistry } from "../tools/registry.js";
@@ -38,6 +38,7 @@ export interface SchedulerRuntimeSettings {
 }
 
 function resolveJobConfig(job: ScheduledJob): Config | null {
+  loadRuntimeEnv(job.cwd);
   if (job.profileName) {
     const store = loadStore();
     const profile = store.profiles[job.profileName];

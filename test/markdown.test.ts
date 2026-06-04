@@ -184,6 +184,30 @@ describe("GFM tables", () => {
       if (desc) Object.defineProperty(process.stdout, "columns", desc);
     }
   });
+
+  it("wraps long cell content instead of truncating it with ellipsis", () => {
+    const desc = Object.getOwnPropertyDescriptor(process.stdout, "columns");
+    try {
+      Object.defineProperty(process.stdout, "columns", {
+        value: 38,
+        configurable: true,
+        writable: true,
+      });
+      const wide = [
+        "| Name | Notes |",
+        "|---|---|",
+        "| Light-Agent | This cell keeps the full content visible across wrapped lines |",
+      ].join("\n");
+      const out = renderMarkdown(wide);
+      expect(out).toContain("This cell keeps th");
+      expect(out).toContain("e full content vis");
+      expect(out).toContain("ible across wrappe");
+      expect(out).not.toContain("…");
+      expect(out.split("\n").every((line) => visibleWidth(line) <= 38)).toBe(true);
+    } finally {
+      if (desc) Object.defineProperty(process.stdout, "columns", desc);
+    }
+  });
 });
 
 describe("streaming invariant", () => {

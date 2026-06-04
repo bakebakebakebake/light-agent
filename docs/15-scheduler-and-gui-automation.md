@@ -67,6 +67,16 @@ spec 规则:
 ~/.light-agent/scheduler/runner.log
 ```
 
+如果你之前还在用 `~/.harness-agent/`,当前版本会把这套 legacy 数据迁到
+`.light-agent/`。迁移前的旧位置是:
+
+```text
+~/.harness-agent/scheduler/jobs.json
+~/.harness-agent/scheduler/runs/
+~/.harness-agent/scheduler/runner.pid
+~/.harness-agent/scheduler/runner.log
+```
+
 行为说明:
 
 - 新增/恢复任务时,会尝试启动 detached runner
