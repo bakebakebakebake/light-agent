@@ -6,6 +6,7 @@ import {
   profileToConfig,
   storeDir,
 } from "./profiles.js";
+import type { CompatibilitySnapshot } from "./model/compat.js";
 import type { ThinkingDepth } from "./model/types.js";
 import type { VisionMode } from "./util/images.js";
 
@@ -149,6 +150,10 @@ export interface Config {
   memoryInjectionBudget: number;
   /** Whether image attachments are allowed for the active profile/model. */
   visionMode?: VisionMode;
+  /** Cached compatibility probe/correction results for this profile. */
+  compat?: CompatibilitySnapshot;
+  /** Profile name when the config came from the profile store. */
+  profileName?: string;
 }
 
 const DEFAULT_MODEL = "claude-sonnet-4-5-20250929";
@@ -214,7 +219,12 @@ export function resolveConfig(cwd: string = process.cwd()): Config | null {
       activeProfile: name,
       profiles: store.profiles,
     });
-    if (profile) return profileToConfig(profile, cwd);
+    if (profile) {
+      return {
+        ...profileToConfig(profile, cwd),
+        profileName: name,
+      };
+    }
   }
 
   try {

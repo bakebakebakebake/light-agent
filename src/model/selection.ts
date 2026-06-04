@@ -1,5 +1,6 @@
 import type { FetchModels, ModelListResult } from "./models.js";
 import { fetchModels as defaultFetchModels } from "./models.js";
+import type { CompatibilitySnapshot } from "./compat.js";
 import { contextWindowFor } from "./contextWindow.js";
 import { humanTokens } from "../ui/status.js";
 
@@ -16,6 +17,7 @@ export interface ModelSource {
   provider: "anthropic" | "openai";
   apiKey: string;
   baseURL?: string;
+  compat?: CompatibilitySnapshot;
 }
 
 export interface SelectModelOptions extends ModelSource {

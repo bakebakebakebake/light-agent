@@ -1,3 +1,6 @@
+import type { CompatibilitySnapshot } from "./compat.js";
+import { catalogCandidates } from "./compat.js";
+
 /**
  * Model discovery (docs/06, feature #9).
  *
@@ -28,6 +31,7 @@ export type FetchModels = (opts: {
   provider: "anthropic" | "openai";
   apiKey: string;
   baseURL?: string;
+  compat?: CompatibilitySnapshot;
 }) => Promise<ModelListResult>;
 
 const TIMEOUT_MS = 8000;
@@ -39,26 +43,50 @@ function trimSlashes(url: string): string {
 
 export const fetchModels: FetchModels = async (opts) => {
   try {
-    const endpoint =
-      opts.provider === "openai"
-        ? openAIEndpoint(opts.apiKey, opts.baseURL)
-        : anthropicEndpoint(opts.apiKey, opts.baseURL);
-    const { resp, resolvedURL, raw, parseError } = await fetchModelsWithFallback(
-      endpoint.url,
-      endpoint.headers,
-      opts.provider === "openai" ? opts.baseURL : undefined,
-    );
-    if (!resp.ok) {
-      return { models: [], error: `HTTP ${resp.status}`, resolvedURL };
+    const protocol = opts.compat?.preferredProtocol ?? opts.provider;
+    const directURL = opts.compat?.catalogURL;
+    const urls =
+      directURL
+        ? [{ url: directURL, baseURL: opts.compat?.resolvedBaseURL }]
+        : catalogCandidates(protocol, opts.compat?.resolvedBaseURL ?? opts.baseURL).map((entry) => ({
+            url: entry.catalogURL,
+            baseURL: entry.resolvedBaseURL,
+          }));
+    const headers: Record<string, string> =
+      protocol === "openai"
+        ? { authorization: `Bearer ${opts.apiKey}` }
+        : {
+            "x-api-key": opts.apiKey,
+            "anthropic-version": "2023-06-01",
+          };
+    let lastError: string | undefined;
+    let lastResolvedURL: string | undefined;
+    for (const entry of urls) {
+      const { resp, resolvedURL, raw, parseError } = await fetchModelsWithFallback(
+        entry.url,
+        headers,
+        protocol === "openai" ? entry.baseURL : undefined,
+      );
+      lastResolvedURL = resolvedURL;
+      if (!resp.ok) {
+        lastError = `HTTP ${resp.status}`;
+        continue;
+      }
+      if (parseError) {
+        lastError = parseError;
+        continue;
+      }
+      const json = raw as { data?: Array<{ id?: unknown }> };
+      const models = (json.data ?? [])
+        .map((m) => (typeof m.id === "string" ? m.id : ""))
+        .filter((id): id is string => id.length > 0);
+      return { models, ...(resolvedURL ? { resolvedURL } : {}) };
     }
-    if (parseError) {
-      return { models: [], error: parseError, resolvedURL };
-    }
-    const json = raw as { data?: Array<{ id?: unknown }> };
-    const models = (json.data ?? [])
-      .map((m) => (typeof m.id === "string" ? m.id : ""))
-      .filter((id): id is string => id.length > 0);
-    return { models, resolvedURL };
+    return {
+      models: [],
+      ...(lastError ? { error: lastError } : {}),
+      ...(lastResolvedURL ? { resolvedURL: lastResolvedURL } : {}),
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return { models: [], error: message };
@@ -107,33 +135,6 @@ async function fetchModelsWithFallback(
       parseError: `Invalid model-list JSON: ${rawText.trim().slice(0, 120) || message}`,
     };
   }
-}
-
-function openAIEndpoint(
-  apiKey: string,
-  baseURL?: string,
-): { url: string; headers: Record<string, string> } {
-  const base = trimSlashes(baseURL ?? "https://api.openai.com/v1");
-  return {
-    url: `${base}/models`,
-    headers: { authorization: `Bearer ${apiKey}` },
-  };
-}
-
-function anthropicEndpoint(
-  apiKey: string,
-  baseURL?: string,
-): { url: string; headers: Record<string, string> } {
-  // baseURL (if any) is the SDK-style base WITHOUT /v1; mirror the SDK by
-  // appending the versioned path ourselves.
-  const base = trimSlashes(baseURL ?? "https://api.anthropic.com");
-  return {
-    url: `${base}/v1/models`,
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-    },
-  };
 }
 
 function shouldRetryOpenAIModelsWithV1(

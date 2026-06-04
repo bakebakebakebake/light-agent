@@ -11,6 +11,7 @@ import {
 import { loadStore } from "../src/profiles.js";
 
 const SAVED = { ...process.env };
+const realFetch = global.fetch;
 afterEach(() => {
   for (const k of Object.keys(process.env)) {
     if (!(k in SAVED)) delete process.env[k];
@@ -28,6 +29,7 @@ afterEach(() => {
   delete process.env.ANTHROPIC_BASE_URL;
   delete process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_BASE_URL;
+  global.fetch = realFetch;
 });
 
 /** Point the profile store at a fresh empty temp dir so the real one (under
@@ -45,6 +47,31 @@ function scriptedAsk(answers: string[]): Ask {
 }
 
 const noModels = async () => ({ models: [] as string[] });
+
+function mockCompatProbe(): void {
+  global.fetch = (async (input: string | URL) => {
+    const url = String(input);
+    if (url.endsWith("/chat/completions")) {
+      return new Response('data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n', {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }
+    if (url.endsWith("/v1/messages")) {
+      return new Response('event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":4}}}\n\nevent: content_block_delta\ndata: {"type":"content_block_delta","delta":{"type":"text_delta","text":"OK"}}\n\nevent: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\nevent: message_stop\ndata: {"type":"message_stop"}\n\n', {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    }
+    if (url.endsWith("/models")) {
+      return new Response(JSON.stringify({ data: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response("not found", { status: 404 });
+  }) as typeof fetch;
+}
 
 describe("isConfigured", () => {
   it("returns false with no store and no env creds", () => {
@@ -124,6 +151,7 @@ describe("writeEnvEntries", () => {
 
 describe("collectOnboarding", () => {
   it("collects an anthropic setup with defaults", async () => {
+    mockCompatProbe();
     // choice=1, key, blank baseURL, blank model (use default)
     const result = await collectOnboarding(
       scriptedAsk(["1", "sk-ant-test", "", ""]),
@@ -136,6 +164,7 @@ describe("collectOnboarding", () => {
   });
 
   it("collects an anthropic proxy with a base URL", async () => {
+    mockCompatProbe();
     const result = await collectOnboarding(
       scriptedAsk(["1", "sk-ant-test", "https://proxy.example.com", ""]),
       noModels,
@@ -144,6 +173,7 @@ describe("collectOnboarding", () => {
   });
 
   it("collects an openai-compatible setup", async () => {
+    mockCompatProbe();
     // choice=2, key, baseURL, model
     const result = await collectOnboarding(
       scriptedAsk([
@@ -161,6 +191,7 @@ describe("collectOnboarding", () => {
   });
 
   it("re-prompts until a model is given for openai", async () => {
+    mockCompatProbe();
     // model required: two blanks then a value
     const result = await collectOnboarding(
       scriptedAsk(["2", "sk-test", "", "", "", "moonshot-v1-8k"]),
@@ -172,6 +203,7 @@ describe("collectOnboarding", () => {
 
 describe("collectOnboarding model fetching (#9)", () => {
   it("offers a fetched list and accepts a numeric pick", async () => {
+    mockCompatProbe();
     // choice=1, key, blank baseURL, then "2" to select the 2nd fetched model.
     const fetch = async () => ({ models: ["model-one", "model-two"] });
     const result = await collectOnboarding(
@@ -183,6 +215,7 @@ describe("collectOnboarding model fetching (#9)", () => {
   });
 
   it("accepts a typed model name even when a list is offered", async () => {
+    mockCompatProbe();
     const fetch = async () => ({ models: ["a", "b"] });
     const result = await collectOnboarding(
       scriptedAsk(["1", "sk-ant-test", "", "custom-model"]),
@@ -192,6 +225,7 @@ describe("collectOnboarding model fetching (#9)", () => {
   });
 
   it("falls back to manual entry when the fetch returns nothing", async () => {
+    mockCompatProbe();
     // empty list → falls through to the Anthropic manual prompt (blank = default)
     const fetch = async () => ({ models: [] as string[] });
     const result = await collectOnboarding(
@@ -202,6 +236,7 @@ describe("collectOnboarding model fetching (#9)", () => {
   });
 
   it("falls back to manual entry when the fetch errors", async () => {
+    mockCompatProbe();
     const fetch = async () => ({ models: [] as string[], error: "boom" });
     const result = await collectOnboarding(
       scriptedAsk(["2", "sk-test", "https://x/v1", "deepseek-chat"]),
@@ -211,6 +246,7 @@ describe("collectOnboarding model fetching (#9)", () => {
   });
 
   it("uses the picker flow when one is available", async () => {
+    mockCompatProbe();
     const fetch = async () => ({ models: ["model-one", "model-two"] });
     const picks: string[] = [];
     const result = await collectOnboarding(

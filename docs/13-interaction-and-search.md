@@ -205,26 +205,47 @@ images: a.png, b.png
 /model test gpt-5-mini
 ```
 
-它会检查两件事:
+它现在不只检查“目录 + 一次 stream”,而是会产出一份结构化兼容报告,重点看:
 
-1. 当前 baseURL 的模型目录接口是不是正常返回 API JSON
-2. 当前模型能不能实际完成一次最小回复
+1. 你的 profile 当前更偏向哪条协议
+2. 实际跑通的是 `anthropic` 还是 `openai`
+3. 实际命中的 `chatURL` / `catalogURL`
+4. catalog / stream / tools / reasoning / vision 这些能力大致是否可用
+5. 失败时属于哪类问题,例如:
+   - `provider_mismatch`
+   - `empty_stream`
+   - `html_instead_of_api`
+   - `unauthorized_client`
+   - `model_not_found`
 
-这对排查“代理站返回网页 HTML,但 CLI 误以为请求成功”这类问题很有用。
+这对排查“代理站看起来能连,但其实协议不对 / 路径不对 / 客户端被拒绝”很有用。
 
-现在在 onboarding 和 `/profile new` 里,只要你先填好了 provider、API key 和 baseURL, CLI 就会立刻尝试抓取对应模型目录:
+现在在 onboarding 和 `/profile new`、`/profile edit` 里,只要你先填好了 provider、API key、baseURL 并选定模型,Light-Agent 就会做一次双链路兼容探测:
 
 - TTY 下优先走 picker 选择
 - 仍然保留 `Enter custom model`
 - 非 TTY 或抓取失败时,继续回退到手工输入
+- 如果用户选的 provider 不能真正跑通,但另一条链路能跑通,会自动纠正并把结果写回 profile
 
-对于 OpenAI 兼容网关,现在还有一层自动恢复:
+对于兼容层,现在有两种自动恢复:
 
-- 如果你填的是站点根地址,例如 `https://example.com`
-- `/models` 或 `/chat/completions` 返回的是网站 HTML
-- Light-Agent 会自动重试标准的 `/v1/models` 和 `/v1/chat/completions`
+1. URL 形态恢复
+   - 如果你填的是站点根地址,例如 `https://example.com`
+   - OpenAI 兼容端点会自动尝试标准 `/v1/...`
+   - Anthropic 兼容端点也会在 root 和 `/v1` 形态之间做纠正
 
-所以像某些代理站“官网地址可打开,真正 API 在 `/v1` 下”这种情况,现在不需要你先手工改配置才能测出来。`/model test` 也会把实际命中的 catalog URL 打出来,方便确认恢复是否生效。
+2. 运行时恢复
+   - 如果真实请求因为 reasoning / tools 这类可选参数被上游拒绝
+   - Light-Agent 会先降级成更轻的最小请求再试一次
+   - 如果当前协议明显不对,还会自动探测另一条协议并重试
+
+所以像某些代理站“官网地址可打开,真正 API 在 `/v1` 下”,或者“同一个 URL 只支持其中一种协议”这种情况,现在不需要你先手工改 profile 才能测出来。`/model test` 会把实际命中的链路和 endpoint 打出来,方便确认到底是哪条路径在工作。
+
+这里有一个明确边界:
+
+- 如果上游返回 `unauthorized_client`
+- 说明它在站点层面拒绝了当前客户端
+- Light-Agent 不会伪装成别的产品去绕过这个限制
 
 模型工具层也同步有:
 

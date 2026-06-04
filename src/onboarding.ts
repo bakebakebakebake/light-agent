@@ -11,6 +11,7 @@ import {
   type Ask as ModelAsk,
   type Pick as ModelPick,
 } from "./model/selection.js";
+import { probeCompatibility, type CompatibilitySnapshot } from "./model/compat.js";
 import { fetchModels as defaultFetchModels, type FetchModels } from "./model/models.js";
 
 /**
@@ -36,6 +37,7 @@ export interface OnboardingResult {
   provider: "anthropic" | "openai";
   model: string;
   baseURL?: string;
+  compat?: CompatibilitySnapshot;
 }
 
 /**
@@ -101,7 +103,19 @@ async function collectAnthropic(
   };
   if (baseURL) entries.ANTHROPIC_BASE_URL = baseURL;
 
-  return { entries, provider: "anthropic", model, baseURL: baseURL || undefined };
+  const probe = await probeCompatibility({
+    preferredProtocol: "anthropic",
+    baseURL: baseURL || undefined,
+    apiKey,
+    model,
+  });
+  return {
+    entries,
+    provider: probe.selected?.preferredProtocol ?? "anthropic",
+    model,
+    baseURL: probe.selected?.resolvedBaseURL ?? (baseURL || undefined),
+    ...(probe.selected ? { compat: probe.selected } : {}),
+  };
 }
 
 async function collectOpenAI(
@@ -137,7 +151,19 @@ async function collectOpenAI(
   };
   if (baseURL) entries.OPENAI_BASE_URL = baseURL;
 
-  return { entries, provider: "openai", model, baseURL: baseURL || undefined };
+  const probe = await probeCompatibility({
+    preferredProtocol: "openai",
+    baseURL: baseURL || undefined,
+    apiKey,
+    model,
+  });
+  return {
+    entries,
+    provider: probe.selected?.preferredProtocol ?? "openai",
+    model,
+    baseURL: probe.selected?.resolvedBaseURL ?? (baseURL || undefined),
+    ...(probe.selected ? { compat: probe.selected } : {}),
+  };
 }
 
 /** Turn a collected result into a Profile (provider + creds). */
@@ -151,6 +177,7 @@ export function resultToProfile(result: OnboardingResult): Profile {
     // Seed recent-model history with the chosen model (feature #8).
     ...(result.model ? { recentModels: [result.model] } : {}),
     ...(result.baseURL ? { baseURL: result.baseURL } : {}),
+    ...(result.compat ? { compat: result.compat } : {}),
   };
 }
 

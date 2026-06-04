@@ -1,5 +1,8 @@
-import Anthropic from "@anthropic-ai/sdk";
 import { readImageAsBase64 } from "../util/images.js";
+import {
+  classifyCompatFailure,
+  type CompatibilitySnapshot,
+} from "./compat.js";
 import type {
   ContentBlock,
   Message,
@@ -13,84 +16,131 @@ import type {
 } from "./types.js";
 
 /**
- * Anthropic provider — a native streaming adapter. See docs/06.
+ * Anthropic provider — native Messages API over plain fetch/SSE.
  *
- * This is written by hand (rather than via a unified library) so the core
- * mechanics are visible: request assembly, consuming the SSE stream, mapping
- * Anthropic's raw events to our normalized ModelEvent, and classifying errors
- * as retryable / context-overflow.
+ * We intentionally own the wire logic here so proxy compatibility is under our
+ * control. That lets the compat layer probe exact URLs, classify empty streams,
+ * and adapt to endpoints that accept `/v1/messages` but behave differently from
+ * the official SDK expectations.
  */
 export class AnthropicProvider implements ModelProvider {
   readonly name = "anthropic";
   readonly model: string;
-  private client: Anthropic;
+  private readonly apiKey: string;
+  private readonly baseURL: string;
+  private readonly chatURL: string;
+  private readonly compat?: CompatibilitySnapshot;
 
-  constructor(opts: { apiKey: string; model: string; baseURL?: string }) {
+  constructor(opts: {
+    apiKey: string;
+    model: string;
+    baseURL?: string;
+    chatURL?: string;
+    compat?: CompatibilitySnapshot;
+  }) {
     this.model = opts.model;
-    // baseURL lets us target an Anthropic-compatible proxy / 中转站 instead of
-    // the official endpoint. Omitted → SDK default (api.anthropic.com).
-    this.client = new Anthropic({
-      apiKey: opts.apiKey,
-      ...(opts.baseURL ? { baseURL: opts.baseURL } : {}),
-    });
+    this.apiKey = opts.apiKey;
+    this.baseURL = (opts.baseURL ?? "https://api.anthropic.com").replace(/\/+$/, "");
+    this.chatURL = opts.chatURL ?? `${this.baseURL}/v1/messages`;
+    this.compat = opts.compat;
   }
 
   async *stream(req: ModelRequest): AsyncIterable<ModelEvent> {
-    // Thinking depth → an Anthropic extended-thinking block (A1). When enabled
-    // the API requires max_tokens > budget_tokens, so the budget is added on top
-    // of the normal output cap rather than eating into it.
-    const budget = thinkingBudget(req.thinking);
+    const effectiveTools =
+      this.compat?.supportsTools === false ? [] : req.tools;
+    const effectiveThinking =
+      this.compat?.supportsReasoning === false ? "off" : req.thinking;
+    const budget = thinkingBudget(effectiveThinking);
     const baseMax = req.maxTokens ?? 4096;
-    const body = {
+
+    const body: Record<string, unknown> = {
       model: this.model,
       system: req.system,
       messages: toAnthropicMessages(req.messages),
-      tools: toAnthropicTools(req.tools),
       max_tokens: budget > 0 ? budget + baseMax : baseMax,
-      ...(budget > 0
-        ? { thinking: { type: "enabled" as const, budget_tokens: budget } }
-        : {}),
-      ...(req.temperature !== undefined ? { temperature: req.temperature } : {}),
+      stream: true,
     };
+    if (effectiveTools.length > 0) {
+      body.tools = toAnthropicTools(effectiveTools);
+    }
+    if (budget > 0) {
+      body.thinking = { type: "enabled", budget_tokens: budget };
+    }
+    if (req.temperature !== undefined) {
+      body.temperature = req.temperature;
+    }
 
-    // Per-stream map: content-block index -> tool_use id, so input deltas and
-    // the stop event can refer back to the right tool call. Must be local to
-    // each call (not module-level) to avoid cross-stream contamination.
-    const idByIndex = new Map<number, string>();
-
-    let inputTokens = 0;
-    let outputTokens = 0;
-    let cacheRead: number | undefined;
-    let cacheWrite: number | undefined;
-    let stopReason: StopReason = "unknown";
-
-    let stream: AsyncIterable<Anthropic.RawMessageStreamEvent>;
+    let resp: Response;
     try {
-      stream = this.client.messages.stream(body, { signal: req.signal });
+      resp = await fetch(this.chatURL, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": this.apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify(body),
+        ...(req.signal ? { signal: req.signal } : {}),
+      });
     } catch (err) {
       yield { type: "error", error: normalizeError(err) };
       return;
     }
 
+    if (!resp.ok || !resp.body) {
+      const text = await safeText(resp);
+      yield { type: "error", error: errorFromStatus(resp.status, text) };
+      return;
+    }
+
+    const contentType = (resp.headers.get("content-type") ?? "").toLowerCase();
+    if (!contentType.includes("text/event-stream")) {
+      const text = await safeText(resp);
+      yield {
+        type: "error",
+        error: {
+          message:
+            `Expected an Anthropic-compatible streaming response from ${this.chatURL}, ` +
+            `but received ${contentType || "an unknown content type"} instead. ` +
+            summarizeUnexpectedBody(text),
+          retryable: false,
+          kind: classifyCompatFailure(contentType || text),
+          ...(resp.status ? { status: resp.status } : {}),
+        },
+      };
+      return;
+    }
+
+    const idByIndex = new Map<number, string>();
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cacheRead: number | undefined;
+    let cacheWrite: number | undefined;
+    let stopReason: StopReason = "unknown";
+    let sawEvent = false;
+
     try {
-      for await (const event of stream) {
-        switch (event.type) {
+      for await (const event of sseEvents(resp.body)) {
+        sawEvent = true;
+        if (event.data === "[DONE]") break;
+        let parsed: AnthropicStreamEvent;
+        try {
+          parsed = JSON.parse(event.data) as AnthropicStreamEvent;
+        } catch {
+          continue;
+        }
+        switch (parsed.type) {
           case "message_start": {
-            // Cache token fields exist on the API response but are not on the
-            // non-beta SDK `Usage` type in this version; read them defensively.
-            const u = event.message.usage as Anthropic.Usage & {
-              cache_read_input_tokens?: number | null;
-              cache_creation_input_tokens?: number | null;
-            };
-            inputTokens = u.input_tokens ?? 0;
-            cacheRead = u.cache_read_input_tokens ?? undefined;
-            cacheWrite = u.cache_creation_input_tokens ?? undefined;
+            const usage = parsed.message?.usage;
+            inputTokens = usage?.input_tokens ?? inputTokens;
+            cacheRead = usage?.cache_read_input_tokens ?? undefined;
+            cacheWrite = usage?.cache_creation_input_tokens ?? undefined;
             break;
           }
           case "content_block_start": {
-            const block = event.content_block;
-            if (block.type === "tool_use") {
-              idByIndex.set(event.index, block.id);
+            const block = parsed.content_block;
+            if (block?.type === "tool_use" && typeof parsed.index === "number") {
+              idByIndex.set(parsed.index, block.id);
               yield {
                 type: "tool_use_start",
                 id: block.id,
@@ -100,39 +150,30 @@ export class AnthropicProvider implements ModelProvider {
             break;
           }
           case "content_block_delta": {
-            const delta = event.delta;
-            if (delta.type === "text_delta") {
+            const delta = parsed.delta;
+            if (!delta) break;
+            if (delta.type === "text_delta" && delta.text) {
               yield { type: "text_delta", text: delta.text };
-            } else if (delta.type === "input_json_delta") {
-              // tool_use arguments arrive as partial JSON; the loop's
-              // accumulator stitches and parses them (docs/06).
-              const id = idByIndex.get(event.index);
+            } else if (delta.type === "input_json_delta" && delta.partial_json) {
+              const id =
+                typeof parsed.index === "number" ? idByIndex.get(parsed.index) : undefined;
               if (id) {
-                yield {
-                  type: "tool_input_delta",
-                  id,
-                  partialJson: delta.partial_json,
-                };
+                yield { type: "tool_input_delta", id, partialJson: delta.partial_json };
               }
-            } else {
-              // Extended-thinking deltas (A1) aren't in this SDK version's delta
-              // union, so read defensively. Surface as a reasoning delta; the
-              // loop shows it but never replays it into history.
-              const t = delta as { type: string; thinking?: string };
-              if (t.type === "thinking_delta" && t.thinking) {
-                yield { type: "reasoning_delta", text: t.thinking };
-              }
+            } else if (delta.type === "thinking_delta" && delta.thinking) {
+              yield { type: "reasoning_delta", text: delta.thinking };
             }
             break;
           }
           case "content_block_stop": {
-            const id = idByIndex.get(event.index);
+            const id =
+              typeof parsed.index === "number" ? idByIndex.get(parsed.index) : undefined;
             if (id) yield { type: "tool_use_stop", id };
             break;
           }
           case "message_delta": {
-            outputTokens = event.usage.output_tokens ?? outputTokens;
-            stopReason = mapStopReason(event.delta.stop_reason);
+            outputTokens = parsed.usage?.output_tokens ?? outputTokens;
+            stopReason = mapStopReason(parsed.delta?.stop_reason ?? null);
             break;
           }
           case "message_stop": {
@@ -140,16 +181,37 @@ export class AnthropicProvider implements ModelProvider {
               inputTokens,
               outputTokens,
               ...(cacheRead !== undefined ? { cacheReadTokens: cacheRead } : {}),
-              ...(cacheWrite !== undefined
-                ? { cacheWriteTokens: cacheWrite }
-                : {}),
+              ...(cacheWrite !== undefined ? { cacheWriteTokens: cacheWrite } : {}),
             };
             yield { type: "message_stop", stopReason, usage };
             break;
           }
+          case "error": {
+            const message = parsed.error?.message ?? "Anthropic-compatible stream error";
+            yield {
+              type: "error",
+              error: {
+                message,
+                retryable: false,
+                kind: classifyCompatFailure(message),
+              },
+            };
+            return;
+          }
           default:
             break;
         }
+      }
+      if (!sawEvent) {
+        yield {
+          type: "error",
+          error: {
+            message:
+              `The Anthropic-compatible endpoint returned an empty streaming body for model "${this.model}".`,
+            retryable: false,
+            kind: "empty_stream",
+          },
+        };
       }
     } catch (err) {
       yield { type: "error", error: normalizeError(err) };
@@ -157,7 +219,40 @@ export class AnthropicProvider implements ModelProvider {
   }
 }
 
-/** Token budget for an extended-thinking block, by depth (A1). 0 ⇒ disabled. */
+interface AnthropicMessageUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+}
+
+interface AnthropicStreamEvent {
+  type: string;
+  index?: number;
+  message?: {
+    usage?: AnthropicMessageUsage;
+  };
+  usage?: {
+    output_tokens?: number;
+  };
+  delta?: {
+    type?: string;
+    text?: string;
+    partial_json?: string;
+    thinking?: string;
+    stop_reason?: "end_turn" | "max_tokens" | "stop_sequence" | "tool_use" | null;
+  };
+  content_block?: {
+    type?: string;
+    id: string;
+    name: string;
+  };
+  error?: {
+    message?: string;
+    type?: string;
+  };
+}
+
 function thinkingBudget(depth: ModelRequest["thinking"]): number {
   switch (depth) {
     case "low":
@@ -171,21 +266,17 @@ function thinkingBudget(depth: ModelRequest["thinking"]): number {
   }
 }
 
-/** Map our Message[] to the Anthropic SDK's MessageParam[]. */
-function toAnthropicMessages(messages: Message[]): Anthropic.MessageParam[] {
-  return messages.map((m) => ({
-    role: m.role,
-    content: m.content.map(toAnthropicBlock),
+function toAnthropicMessages(messages: Message[]): Array<{
+  role: Message["role"];
+  content: Array<Record<string, unknown>>;
+}> {
+  return messages.map((message) => ({
+    role: message.role,
+    content: message.content.map(toAnthropicBlock),
   }));
 }
 
-function toAnthropicBlock(
-  block: ContentBlock,
-):
-  | Anthropic.TextBlockParam
-  | Anthropic.ImageBlockParam
-  | Anthropic.ToolUseBlockParam
-  | Anthropic.ToolResultBlockParam {
+function toAnthropicBlock(block: ContentBlock): Record<string, unknown> {
   switch (block.type) {
     case "text":
       return { type: "text", text: block.text };
@@ -215,11 +306,11 @@ function toAnthropicBlock(
   }
 }
 
-function toAnthropicTools(tools: ToolSpec[]): Anthropic.Tool[] {
-  return tools.map((t) => ({
-    name: t.name,
-    description: t.description,
-    input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
+function toAnthropicTools(tools: ToolSpec[]): Array<Record<string, unknown>> {
+  return tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.inputSchema,
   }));
 }
 
@@ -240,24 +331,95 @@ function mapStopReason(
   }
 }
 
-/** Classify SDK errors into our normalized, retryable-aware shape (docs/06). */
+function errorFromStatus(status: number, detail: string): ProviderError {
+  const message = `Anthropic-compatible API error ${status}${detail ? ` ${detail}` : ""}`.trim();
+  const retryable = status === 429 || status >= 500;
+  return {
+    message,
+    retryable,
+    ...(status ? { status } : {}),
+    kind: classifyCompatFailure(message, status),
+  };
+}
+
 function normalizeError(err: unknown): ProviderError {
-  if (err instanceof Anthropic.APIError) {
-    const status = err.status;
-    const retryable =
-      status === 429 || (status !== undefined && status >= 500);
-    const contextOverflow =
-      status === 400 && /context|too long|maximum/i.test(err.message);
+  if (err instanceof Error) {
+    const text = err.message;
+    const kind = classifyCompatFailure(text);
     return {
-      message: err.message,
-      retryable,
-      ...(contextOverflow ? { contextOverflow: true } : {}),
-      ...(status !== undefined ? { status } : {}),
+      message: text,
+      retryable: /timed out|timeout|fetch failed|econn|socket|503|502|429/i.test(text),
+      kind,
     };
   }
-  if (err instanceof Error) {
-    // Network/timeout errors are generally retryable.
-    return { message: err.message, retryable: true };
+  return { message: String(err), retryable: false, kind: "unknown" };
+}
+
+function summarizeUnexpectedBody(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return "The body was empty.";
+  if (/<!doctype html>|<html[\s>]/i.test(trimmed)) {
+    return "The server returned HTML, which usually means this URL points at a website page instead of a real Anthropic-compatible API endpoint.";
   }
-  return { message: String(err), retryable: false };
+  return `Response preview: ${trimmed.slice(0, 180)}`;
+}
+
+async function safeText(resp: Response): Promise<string> {
+  try {
+    return await resp.text();
+  } catch {
+    return "";
+  }
+}
+
+interface SseEvent {
+  event?: string;
+  data: string;
+}
+
+async function* sseEvents(stream: ReadableStream<Uint8Array>): AsyncGenerator<SseEvent> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let eventName: string | undefined;
+  let dataLines: string[] = [];
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    while (true) {
+      const idx = buffer.indexOf("\n");
+      if (idx === -1) break;
+      const rawLine = buffer.slice(0, idx).replace(/\r$/, "");
+      buffer = buffer.slice(idx + 1);
+      if (rawLine === "") {
+        if (dataLines.length > 0) {
+          yield { ...(eventName ? { event: eventName } : {}), data: dataLines.join("\n") };
+        }
+        eventName = undefined;
+        dataLines = [];
+        continue;
+      }
+      if (rawLine.startsWith("event:")) {
+        eventName = rawLine.slice(6).trim();
+      } else if (rawLine.startsWith("data:")) {
+        dataLines.push(rawLine.slice(5).trimStart());
+      }
+    }
+  }
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    for (const line of buffer.split("\n")) {
+      const normalized = line.replace(/\r$/, "");
+      if (normalized.startsWith("event:")) {
+        eventName = normalized.slice(6).trim();
+      } else if (normalized.startsWith("data:")) {
+        dataLines.push(normalized.slice(5).trimStart());
+      }
+    }
+  }
+  if (dataLines.length > 0) {
+    yield { ...(eventName ? { event: eventName } : {}), data: dataLines.join("\n") };
+  }
 }

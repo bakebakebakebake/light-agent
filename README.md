@@ -149,15 +149,21 @@ Useful commands inside the app:
   treated as legacy and will migrate forward to `.light-agent`.
 - `/config` and `/config search` both support picker flows in TTY mode, so you
   can choose search backend / key actions without memorizing every subcommand.
-- `/model test` runs a quick smoke test against the current OpenAI/Anthropic
-  config: it checks model catalog discovery and then asks the configured model
-  to reply with a tiny fixed answer. This is the fastest way to tell whether a
-  model/baseURL pair is really usable.
-- For OpenAI-compatible setups, if `baseURL` points at a website root such as
-  `https://host.example` and that root returns HTML, Light-Agent now retries
-  the standard `/v1/...` API path automatically for both model discovery and
-  streaming. `/model test` shows the resolved catalog URL so this recovery is
-  visible.
+- `/model test` now produces a structured compatibility report for the current
+  URL + key + model combination. It shows the profile's preferred provider,
+  the protocol that actually answered, the resolved `chatURL` / `catalogURL`,
+  and capability hints for catalog, streaming, tools, reasoning, and vision.
+- Provider in a profile now acts as a preferred protocol, not a hard lock.
+  Light-Agent probes both Anthropic-compatible and OpenAI-compatible chains,
+  auto-corrects to the usable one when needed, persists the resolved endpoint,
+  and reuses it on later runs.
+- OpenAI-compatible roots still auto-recover from website URLs such as
+  `https://host.example` to the real `/v1/...` API path. Anthropic-compatible
+  probing now also tolerates root-vs-`/v1` URL shape differences and records
+  the exact endpoint that worked.
+- Runtime model calls also get a compatibility recovery pass before failing:
+  Light-Agent first strips optional reasoning/tool payloads, then reprobes the
+  alternate protocol when the original chain clearly mismatches.
 - `!` commands now run in the real foreground TTY through your login +
   interactive shell, so aliases such as `ll` work more like your local
   terminal. Foreground execution now avoids the job-control path that could
@@ -208,6 +214,9 @@ Current keys:
 Notes:
 
 - `disabledSkills` removes a skill from the prompt catalog and from `#` / `/skill`.
+- `provider` is the profile's preferred protocol. Compatibility probing may
+  correct the live protocol/baseURL and persist the resolved chain back into
+  the profile metadata.
 - `blockedCommands` only applies to model-driven `bash` / `shell` actions.
 - `protectedPaths` blocks model-driven `edit` / `write`, and also blocks shell
   commands that obviously target those paths.

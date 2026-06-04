@@ -2,6 +2,7 @@ import type { CommandContext, PickItem, SlashCommand } from "./registry.js";
 import { contextWindowFor } from "../model/contextWindow.js";
 import { modelHint, selectModel } from "../model/selection.js";
 import { smokeTestModel } from "../model/smoke.js";
+import { probeCompatibility, summarizeCompatFailure } from "../model/compat.js";
 import { collectOnboarding } from "../onboarding.js";
 import { globalEnvPath, writeGlobalEnvEntries } from "../config.js";
 import {
@@ -152,8 +153,10 @@ export const configCommand: SlashCommand = {
     const lines = [
       `  ${dim("profile")}  ${profileName ? cyan(profileName) : dim("(env/.env)")}`,
       `  ${dim("provider")} ${config.provider}`,
+      `  ${dim("actual")}   ${config.compat?.preferredProtocol ?? config.provider}`,
       `  ${dim("model")}    ${config.model}`,
       `  ${dim("baseURL")}  ${config.baseURL ?? dim("(default)")}`,
+      `  ${dim("chatURL")}  ${config.compat?.chatURL ?? dim("(auto)")}`,
       `  ${dim("context")}  ${ctxLabel}`,
       `  ${dim("vision")}   ${config.visionMode ?? "auto"}`,
       `  ${dim("apiKey")}   ${maskKey(config.apiKey)}`,
@@ -196,7 +199,11 @@ function printProfiles(ctx: CommandContext): void {
     const active = name === store.activeProfile;
     const marker = active ? green(symbols.tool) : " ";
     const label = active ? bold(green(name)) : name;
-    return `  ${marker} ${label} ${dim(`${profile.provider} ${symbols.dot} ${profile.model}`)}`;
+    const compat =
+      profile.compat?.preferredProtocol && profile.compat.preferredProtocol !== profile.provider
+        ? `${profile.provider} -> ${profile.compat.preferredProtocol}`
+        : profile.provider;
+    return `  ${marker} ${label} ${dim(`${compat} ${symbols.dot} ${profile.model}`)}`;
   });
   ctx.out(rows.join("\n"));
 }
@@ -267,7 +274,11 @@ function printProfileHomeText(ctx: CommandContext, store: ReturnType<typeof load
       const profile = store.profiles[name]!;
       const active = name === store.activeProfile;
       const label = active ? green(`${name} (active)`) : name;
-      ctx.out(`    ${label} ${dim(`${profile.provider} ${symbols.dot} ${profile.model}`)}`);
+      const compat =
+        profile.compat?.preferredProtocol && profile.compat.preferredProtocol !== profile.provider
+          ? `${profile.provider} -> ${profile.compat.preferredProtocol}`
+          : profile.provider;
+      ctx.out(`    ${label} ${dim(`${compat} ${symbols.dot} ${profile.model}`)}`);
     }
   }
   ctx.out(dim("  Actions"));
@@ -344,6 +355,7 @@ async function profileNew(ctx: CommandContext): Promise<{ exit?: boolean }> {
     model: result.model,
     apiKey: result.entries.ANTHROPIC_API_KEY ?? result.entries.OPENAI_API_KEY!,
     ...(result.baseURL ? { baseURL: result.baseURL } : {}),
+    ...(result.compat ? { compat: result.compat } : {}),
   };
   profile = rememberModel(profile, result.model);
   upsertProfile(store, name, profile);
@@ -378,6 +390,7 @@ async function profileEdit(
   const source = {
     provider: current.provider,
     apiKey: key || current.apiKey,
+    ...(current.compat ? { compat: current.compat } : {}),
     ...(baseURL ? { baseURL } : current.baseURL ? { baseURL: current.baseURL } : {}),
   } as const;
   const selection = await selectModel({
@@ -391,13 +404,24 @@ async function profileEdit(
     choosePrompt: `  Model for "${name}"`,
   });
   const model = selection.model || current.model;
+  const resolvedBaseURL =
+    baseURL || current.baseURL ? { baseURL: baseURL || current.baseURL } : {};
+  const compatReport = await probeCompatibility({
+    preferredProtocol: current.provider,
+    apiKey: key || current.apiKey,
+    ...(resolvedBaseURL.baseURL ? { baseURL: resolvedBaseURL.baseURL } : {}),
+    model,
+  });
 
   let next: Profile = {
     ...current,
+    provider: compatReport.selected?.preferredProtocol ?? current.provider,
     model,
     ...(key ? { apiKey: key } : {}),
+    ...(compatReport.selected ? { compat: compatReport.selected } : {}),
   };
-  if (baseURL) next.baseURL = baseURL;
+  if (compatReport.selected?.resolvedBaseURL) next.baseURL = compatReport.selected.resolvedBaseURL;
+  else if (baseURL) next.baseURL = baseURL;
   next = rememberModel(next, model);
   upsertProfile(store, name, next);
   saveStore(store);
@@ -509,27 +533,31 @@ export const modelCommand: SlashCommand = {
       ctx.out(`  ${dim("provider")} ${result.provider}`);
       ctx.out(`  ${dim("model")}    ${result.model}`);
       if (result.baseURL) ctx.out(`  ${dim("baseURL")}  ${result.baseURL}`);
+      if (result.actualProtocol) ctx.out(`  ${dim("actual")}   ${result.actualProtocol}`);
+      if (result.corrected) ctx.out(`  ${dim("corrected")} yes`);
+      if (result.chatURL) ctx.out(`  ${dim("chatURL")}  ${result.chatURL}`);
       if (result.catalogResolvedURL) ctx.out(`  ${dim("catalogURL")} ${result.catalogResolvedURL}`);
+      const catalogLine = result.catalogOk
+        ? green(`ok (${result.catalogCount ?? 0} models visible)`)
+        : result.streamOk
+          ? yellow("unsupported by this endpoint")
+          : red(result.catalogError ?? "failed");
       ctx.out(
-        `  ${dim("catalog")}  ` +
-          (result.catalogOk
-            ? green(`ok (${result.catalogCount ?? 0} models visible)`)
-            : red(result.catalogError ?? "failed")),
+        `  ${dim("catalog")}  ` + catalogLine,
       );
+      if (!result.catalogOk && result.streamOk && result.catalogError) {
+        ctx.out(`  ${dim("catalog note")} ${dim(result.catalogError.slice(0, 160))}`);
+      }
       ctx.out(
         `  ${dim("stream")}   ` +
-          (result.streamOk
-            ? green(`ok ${result.outputText ? `→ ${result.outputText}` : ""}`.trim())
-            : red(result.streamError ?? "empty response")),
+          (result.streamOk ? green("ok") : red(result.streamError ?? "empty response")),
       );
-      if (result.stopReason) ctx.out(`  ${dim("stop")}     ${result.stopReason}`);
-      if (result.usage) {
-        ctx.out(
-          `  ${dim("usage")}    ${result.usage.inputTokens} in ${symbols.dot} ${result.usage.outputTokens} out`,
-        );
-      }
+      if (result.supportsTools !== undefined) ctx.out(`  ${dim("tools")}    ${result.supportsTools ? green("yes") : yellow("no")}`);
+      if (result.supportsReasoning !== undefined) ctx.out(`  ${dim("reason")}   ${result.supportsReasoning ? green("yes") : yellow("no")}`);
+      if (result.supportsVision !== undefined) ctx.out(`  ${dim("vision")}   ${result.supportsVision ? green("yes") : yellow("no")}`);
+      if (result.failureKind) ctx.out(`  ${dim("failure")}  ${result.failureKind} ${dim(`(${summarizeCompatFailure(result.failureKind)})`)}`);
       if (!result.streamOk) {
-        ctx.out(dim("  Tip: if catalog or stream returns HTML, your baseURL is likely pointing at a website page instead of a real /v1 API endpoint."));
+        ctx.out(dim("  Tip: Light-Agent probes both Anthropic and OpenAI-compatible chains and shows the resolved endpoint that actually answered."));
       }
       return {};
     }
@@ -541,6 +569,7 @@ export const modelCommand: SlashCommand = {
         pick: ctx.pick,
         provider: ctx.state.config.provider,
         apiKey: ctx.state.config.apiKey,
+        ...(ctx.state.config.compat ? { compat: ctx.state.config.compat } : {}),
         ...(ctx.state.config.baseURL ? { baseURL: ctx.state.config.baseURL } : {}),
         currentModel: ctx.state.config.model,
         recentModels: currentProfile?.recentModels ?? [],

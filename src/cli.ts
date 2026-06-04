@@ -221,7 +221,7 @@ async function main(): Promise<void> {
   state = {
     config,
     provider: createProvider(config),
-    profileName: loadStore().activeProfile,
+    profileName: config.profileName ?? loadStore().activeProfile,
     history: [],
     session: newSession({ provider: config.provider, model: config.model }),
     mode: policy.getMode(),
@@ -250,7 +250,7 @@ async function main(): Promise<void> {
       if (!next) return;
       this.config = next;
       this.provider = createProvider(next);
-      this.profileName = loadStore().activeProfile;
+      this.profileName = next.profileName ?? loadStore().activeProfile;
       this.refreshSkills();
       printBanner(this.config, this.profileName);
     },

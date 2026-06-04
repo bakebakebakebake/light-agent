@@ -10,6 +10,10 @@ import type {
   Usage,
 } from "./types.js";
 import { readImageAsBase64 } from "../util/images.js";
+import {
+  classifyCompatFailure,
+  type CompatibilitySnapshot,
+} from "./compat.js";
 
 /**
  * OpenAI-compatible provider — a native streaming adapter. See docs/06.
@@ -30,8 +34,16 @@ export class OpenAIProvider implements ModelProvider {
   readonly model: string;
   private apiKey: string;
   private baseURL: string;
+  private chatURL?: string;
+  private compat?: CompatibilitySnapshot;
 
-  constructor(opts: { apiKey: string; model: string; baseURL?: string }) {
+  constructor(opts: {
+    apiKey: string;
+    model: string;
+    baseURL?: string;
+    chatURL?: string;
+    compat?: CompatibilitySnapshot;
+  }) {
     this.model = opts.model;
     this.apiKey = opts.apiKey;
     // Default to OpenAI's endpoint; most compatible providers supply their own.
@@ -39,27 +51,34 @@ export class OpenAIProvider implements ModelProvider {
       /\/+$/,
       "",
     );
+    this.chatURL = opts.chatURL;
+    this.compat = opts.compat;
   }
 
   async *stream(req: ModelRequest): AsyncIterable<ModelEvent> {
-    const wantThinking = !!req.thinking && req.thinking !== "off";
+    const effectiveTools = this.compat?.supportsTools === false ? [] : req.tools;
+    const effectiveThinking =
+      this.compat?.supportsReasoning === false ? "off" : req.thinking;
+    const wantThinking = !!effectiveThinking && effectiveThinking !== "off";
     const reasoning = isReasoningModel(this.model);
-    const deepSeekThinking = deepSeekThinkingOptions(this.model, req.thinking);
+    const deepSeekThinking = deepSeekThinkingOptions(this.model, effectiveThinking);
     const tokenCap = req.maxTokens ?? 4096;
     // Base payload shared by all models.
     const body: Record<string, unknown> = {
       model: this.model,
       messages: toOpenAIMessages(req.system, req.messages),
-      tools: toOpenAITools(req.tools),
       stream: true,
       stream_options: { include_usage: true },
     };
+    if (effectiveTools.length > 0) {
+      body.tools = toOpenAITools(effectiveTools);
+    }
     if (reasoning) {
       // o-series / gpt-5 reasoning models: they require `max_completion_tokens`
       // (reject `max_tokens`) and only accept the default temperature, so we
       // omit it. `reasoning_effort` (low|medium|high) tunes the depth (A1).
       body.max_completion_tokens = tokenCap;
-      if (wantThinking) body.reasoning_effort = req.thinking;
+      if (wantThinking) body.reasoning_effort = effectiveThinking;
     } else if (deepSeekThinking) {
       // DeepSeek v4 thinking mode uses a provider-native `thinking` block plus
       // `reasoning_effort`, even over the OpenAI-compatible endpoint.
@@ -79,8 +98,9 @@ export class OpenAIProvider implements ModelProvider {
     }
 
     let resp: Response;
+    const primaryURL = this.chatURL ?? `${this.baseURL}/chat/completions`;
     try {
-      resp = await postJson(`${this.baseURL}/chat/completions`, this.apiKey, body, req.signal);
+      resp = await postJson(primaryURL, this.apiKey, body, req.signal);
     } catch (err) {
       yield { type: "error", error: normalizeError(err) };
       return;
@@ -88,7 +108,10 @@ export class OpenAIProvider implements ModelProvider {
 
     if (!resp.ok || !resp.body) {
       let text = await safeText(resp);
-      if (shouldRetryWithV1Base(this.baseURL, resp.status, text, resp.headers.get("content-type"))) {
+      if (
+        !this.chatURL &&
+        shouldRetryWithV1Base(this.baseURL, resp.status, text, resp.headers.get("content-type"))
+      ) {
         try {
           resp = await postJson(`${withV1BaseURL(this.baseURL)}/chat/completions`, this.apiKey, body, req.signal);
           text = resp.ok && resp.body ? "" : await safeText(resp);
@@ -103,7 +126,7 @@ export class OpenAIProvider implements ModelProvider {
         delete retryBody.reasoning_effort;
         try {
           resp = await postJson(
-            `${this.baseURL}/chat/completions`,
+            primaryURL,
             this.apiKey,
             retryBody,
             req.signal,
@@ -145,6 +168,7 @@ export class OpenAIProvider implements ModelProvider {
               `but received ${contentType || "an unknown content type"} instead. ` +
               summarizeUnexpectedBody(text),
             retryable: false,
+            kind: classifyCompatFailure(contentType || text),
           },
         };
         return;
@@ -162,6 +186,7 @@ export class OpenAIProvider implements ModelProvider {
             `but received ${retriedContentType || "an unknown content type"} instead. ` +
             summarizeUnexpectedBody(text),
           retryable: false,
+          kind: classifyCompatFailure(retriedContentType || text),
         },
       };
       return;
@@ -191,6 +216,7 @@ export class OpenAIProvider implements ModelProvider {
               `The OpenAI-compatible endpoint returned an empty streaming body for model "${this.model}". ` +
               "This usually means the base URL is not pointing at a real /v1 API endpoint, or the proxy does not support this model.",
             retryable: false,
+            kind: "empty_stream",
           },
         };
         return;
@@ -659,6 +685,7 @@ function errorFromStatus(status: number, detail: string): ProviderError {
     retryable,
     ...(contextOverflow ? { contextOverflow: true } : {}),
     status,
+    kind: classifyCompatFailure(message, status),
   };
 }
 
@@ -667,9 +694,17 @@ function normalizeError(err: unknown): ProviderError {
   if (err instanceof Error) {
     // AbortError is not retryable; other network errors generally are.
     const aborted = err.name === "AbortError";
-    return { message: err.message, retryable: !aborted };
+    return {
+      message: err.message,
+      retryable: !aborted,
+      kind: classifyCompatFailure(err.message),
+    };
   }
-  return { message: String(err), retryable: false };
+  return {
+    message: String(err),
+    retryable: false,
+    kind: classifyCompatFailure(String(err)),
+  };
 }
 
 function truncate(s: string, max: number): string {

@@ -270,6 +270,46 @@ describe("dispatch parsing", () => {
     expect(out).toContain("website page");
   });
 
+  it("treats catalog probe as soft when chat works", async () => {
+    isolated();
+    global.fetch = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url === "https://example.com/models") {
+        return new Response("<!doctype html><html><body>site</body></html>", {
+          status: 200,
+          headers: { "content-type": "text/html" },
+        });
+      }
+      if (url === "https://example.com/v1/models") {
+        return new Response(JSON.stringify({ data: [{ id: "gpt-5.4-mini" }] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (url.endsWith("/chat/completions")) {
+        return new Response('data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n', {
+          status: 200,
+          headers: { "content-type": "text/event-stream" },
+        });
+      }
+      return new Response("not found", { status: 404 });
+    }) as typeof fetch;
+    const reg = buildRegistry();
+    const { ctx, state, output } = makeCtx();
+    state.config = {
+      ...state.config,
+      provider: "openai",
+      apiKey: "sk-test",
+      model: "gpt-5.4-mini",
+      baseURL: "https://example.com",
+    };
+    await reg.dispatch("/model test", ctx);
+    const out = output();
+    expect(out).toContain("catalogURL https://example.com/v1/models");
+    expect(out).toContain("stream   ok");
+    expect(out).toContain("catalog  ok (1 models visible)");
+  });
+
   it("shows memory stats and list output", async () => {
     isolated();
     const root = mkdtempSync(join(tmpdir(), "memory-cmd-"));

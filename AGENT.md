@@ -66,7 +66,8 @@ model/                 # 模型交互层(loop ↔ API)
   types.ts             #   ModelProvider/ModelRequest/ModelEvent/Usage/ThinkingDepth
   anthropic.ts         #   Anthropic Messages API 适配器(流式)
   openai.ts            #   OpenAI 兼容适配器(OpenRouter/DeepSeek/Kimi/Ollama…)
-  index.ts             #   按 config.provider 选择适配器
+  compat.ts            #   URL/API 兼容探测、失败分类、协议纠正、能力缓存
+  index.ts             #   兼容包装层 + provider 选择
   models.ts            #   模型元数据表
   contextWindow.ts     #   模型→上下文窗口大小(可被 #11 覆盖)
 
@@ -126,7 +127,7 @@ util/                  # git.ts(分支/缓存/diff)、shell.ts、web.ts、images
 
 ### 关键抽象(接口签名速查)
 - **ModelProvider**(`model/types.ts`):`stream(req: ModelRequest): AsyncIterable<ModelEvent>`
-  ——循环只认这一个接口,换 provider 纯靠 config。
+  ——循环只认这一个接口。当前 `provider` 更接近“首选协议”,真正跑哪条链路由兼容层自动纠正。
 - **ModelEvent**:`text_delta | reasoning_delta | tool_use_start | tool_input_delta
   | tool_use_stop | message_stop{stopReason,usage} | error`。
 - **LoopEvent**(`loop/types.ts`):`turn_start | text_delta | reasoning | tool_call
@@ -362,6 +363,7 @@ util/                  # git.ts(分支/缓存/diff)、shell.ts、web.ts、images
 - **注释**:只在"为什么"非显而易见时写;避免复述代码做什么。沿用现有文件的中/英
   混合注释风格(代码注释多为英文,docs 为中文)。
 - **provider 中立**:循环只依赖 `ModelProvider.stream`;新功能不要耦合具体 provider。
+- **兼容优先**:对于 URL + API key,优先让 Light-Agent 自动找出可用链路,再决定最终的 provider/baseURL 持久化结果。
 
 ### ⚠️ 关于本轮会话中反复出现的"Bash 文档粘贴"
 上一会话里,几乎每条用户消息都附带了一大段 **Bash 工具的参考文档**(以

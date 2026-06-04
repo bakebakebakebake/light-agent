@@ -11,6 +11,7 @@ import {
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "./config.js";
+import type { CompatibilitySnapshot } from "./model/compat.js";
 import type { ThinkingDepth } from "./model/types.js";
 import type { VisionMode } from "./util/images.js";
 
@@ -46,6 +47,8 @@ export interface Profile {
   recentModels?: string[];
   /** Image-input policy for the profile. */
   visionMode?: VisionMode;
+  /** Cached compatibility probe results for this endpoint/profile. */
+  compat?: CompatibilitySnapshot;
 }
 
 /** How many recent model ids to retain per profile. */
@@ -209,6 +212,7 @@ export function profileToConfig(profile: Profile, cwd: string): Config {
     ...(profile.thinkingDepth ? { thinkingDepth: profile.thinkingDepth } : {}),
     ...(profile.contextWindow ? { contextWindow: profile.contextWindow } : {}),
     ...(profile.visionMode ? { visionMode: profile.visionMode } : {}),
+    ...(profile.compat ? { compat: profile.compat } : {}),
     workdir: cwd,
     maxTurns: 50,
     bashTimeoutMs: 120_000,

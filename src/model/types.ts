@@ -1,3 +1,5 @@
+import type { CompatFailureKind } from "./compat.js";
+
 /**
  * Model interaction layer types — see docs/06-model-interaction.md.
  *
@@ -113,6 +115,7 @@ export interface ProviderError {
   /** True if the payload exceeded the context window. */
   contextOverflow?: boolean;
   status?: number;
+  kind?: CompatFailureKind;
 }
 
 /**
